@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
-DEFAULT_CHECKPOINTER: Optional[Any] = None
-DEFAULT_TRACER: Optional[Any] = None
-HTTP_PROXY_PORT: Optional[int] = None
+DEFAULT_CHECKPOINTER: Any | None = None
+DEFAULT_TRACER: Any | None = None
+HTTP_PROXY_PORT: int | None = None

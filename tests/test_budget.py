@@ -2,8 +2,6 @@
 
 from dataclasses import dataclass
 
-import pytest
-
 from aegis import AgentState, Budget, RunConfig, graph, node, tool
 from aegis.checkpointers import MemoryCheckpointer
 from aegis.testing import MockTool
@@ -91,7 +89,6 @@ async def test_no_budget_allows_unlimited_tool_calls():
 
 async def test_budget_status_tracks_tool_calls():
     """BudgetStatus should accurately report tool calls made."""
-    from aegis._context import RunContext
 
     @node()
     async def counted_calls(state: BudgetState, tools) -> BudgetState:

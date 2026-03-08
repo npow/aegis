@@ -7,8 +7,10 @@ import hashlib
 import json
 import time
 import uuid
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, AsyncIterator, Optional
+from typing import Any
 
 from ._context import (
     GraphContext,
@@ -17,6 +19,7 @@ from ._context import (
     ToolContext,
     _run_context,
 )
+from ._decorators import _TOOL_REGISTRY, GraphDef, NodeDef
 from ._models import (
     AgentState,
     Budget,
@@ -29,23 +32,48 @@ from ._models import (
     RunResult,
     RunTrace,
 )
-from ._decorators import GraphDef, NodeDef, _TOOL_REGISTRY
+
+# ── Streaming event ────────────────────────────────────────────────────────────
+
+
+@dataclass
+class GraphEvent:
+    """Emitted for each node completion during stream()."""
+
+    type: str  # "node_completed" | "node_failed"
+    node_name: str
+    state: AgentState
+    error: str | None = None
 
 
 # ── Main entry points ─────────────────────────────────────────────────────────
+
 
 async def _run_graph(
     graph_def: GraphDef,
     input_state: AgentState,
     config: RunConfig,
-    budget: Optional[Budget] = None,
+    budget: Budget | None = None,
     *,
     fast_forward_to_step: int = -1,
-    existing_checkpoints: Optional[dict[int, Checkpoint]] = None,
+    existing_checkpoints: dict[int, Checkpoint] | None = None,
     is_resume: bool = False,
+    parent_run_id: str | None = None,
+    stream_queue: asyncio.Queue | None = None,  # type: ignore[type-arg]
 ) -> RunResult:
     run_id = f"run-{uuid.uuid4().hex[:8]}"
     checkpointer = graph_def._resolve_checkpointer(config)
+
+    # Resolve OTel tracer from global config
+    from . import _globals
+
+    otel_tracer: Any | None = None
+    if _globals.DEFAULT_TRACER is not None:
+        try:
+            otel_tracer = _globals.DEFAULT_TRACER._get_tracer()
+        except Exception:
+            pass
+
     trace = RunTrace(
         run_id=run_id,
         thread_id=config.thread_id,
@@ -54,12 +82,11 @@ async def _run_graph(
         started_at=datetime.utcnow(),
         completed_at=None,
         status="running" if not is_resume else "resumed",
+        parent_run_id=parent_run_id,
     )
 
     # Pull in any testing overrides (mock_tools / cassette)
-    mock_tools, mock_ctx, cassette_mode, cassette, cassette_override_tools = (
-        _get_testing_state()
-    )
+    mock_tools, mock_ctx, cassette_mode, cassette, cassette_override_tools = _get_testing_state()
 
     ctx = RunContext(
         run_id=run_id,
@@ -80,10 +107,13 @@ async def _run_graph(
         _existing_checkpoints=existing_checkpoints or {},
         _budget_start_time=time.monotonic(),
         _budget_exceeded_handler=graph_def._budget_exceeded_handler,
+        stream_queue=stream_queue,
+        otel_tracer=otel_tracer,
     )
 
     # Inject run metadata into state
     import dataclasses as _dc
+
     input_state = _dc.replace(input_state, thread_id=config.thread_id, run_id=run_id)
 
     # Checkpoint the initial input state (step 0)
@@ -106,10 +136,24 @@ async def _run_graph(
 
     token = _run_context.set(ctx)
     result_state = input_state
-    error: Optional[RunError] = None
+    error: RunError | None = None
 
     try:
-        result_state = await graph_def.fn(input_state)
+        # Wrap in OTel span if configured
+        if otel_tracer is not None:
+            with otel_tracer.start_as_current_span(f"aegis.graph.{graph_def.name}") as span:
+                span.set_attribute("aegis.graph_name", graph_def.name)
+                span.set_attribute("aegis.graph_version", graph_def.version)
+                span.set_attribute("aegis.run_id", run_id)
+                span.set_attribute("aegis.thread_id", config.thread_id)
+                # Capture OTel trace ID for observability linkage
+                try:
+                    trace.otel_trace_id = format(span.get_span_context().trace_id, "032x")
+                except Exception:
+                    pass
+                result_state = await graph_def.fn(input_state)
+        else:
+            result_state = await graph_def.fn(input_state)
         trace.status = "completed"
     except BudgetExceededError as exc:
         trace.status = "budget_exceeded"
@@ -120,6 +164,7 @@ async def _run_graph(
         )
     except Exception as exc:
         import traceback as tb
+
         trace.status = "failed"
         trace.error = str(exc)
         error = RunError(
@@ -168,11 +213,16 @@ async def _resume_graph(
     # Get the initial input state from step 0 checkpoint
     input_ckpt = existing.get(0)
     if input_ckpt is None:
-        raise NoCheckpointError("Missing step-0 (input) checkpoint; cannot reconstruct initial state.")
+        raise NoCheckpointError(
+            "Missing step-0 (input) checkpoint; cannot reconstruct initial state."
+        )
 
     # We need to reconstruct state_type from the graph's function annotation
     state_type = _infer_state_type(graph_def)
     input_state = _deserialize_state(input_ckpt.state_snapshot, state_type)
+
+    # Preserve the previous run_id as parent for lineage tracking
+    prev_run_id = existing[last_step].run_id
 
     return await _run_graph(
         graph_def=graph_def,
@@ -181,6 +231,7 @@ async def _resume_graph(
         fast_forward_to_step=last_step,
         existing_checkpoints=existing,
         is_resume=True,
+        parent_run_id=prev_run_id,
     )
 
 
@@ -190,17 +241,20 @@ async def _fork_graph(
     checkpoint_id: str,
     inject_state: dict[str, Any],
     new_thread_id: str,
+    config: RunConfig | None = None,
 ) -> RunResult:
-    """Fork from a specific checkpoint with optional state injection."""
-    checkpointer = graph_def._resolve_checkpointer(None)
+    """Fork from a specific checkpoint with optional state injection.
+
+    ``config`` controls which checkpointer is used to look up the original
+    thread's history. Falls back to the graph-level default when omitted.
+    """
+    checkpointer = graph_def._resolve_checkpointer(config)
     history = await checkpointer.get_history(thread_id, graph_def.name)
 
     # Find the target checkpoint
     target = next((c for c in history if c.id == checkpoint_id), None)
     if target is None:
-        raise NoCheckpointError(
-            f"Checkpoint '{checkpoint_id}' not found for thread '{thread_id}'."
-        )
+        raise NoCheckpointError(f"Checkpoint '{checkpoint_id}' not found for thread '{thread_id}'.")
 
     # Build existing checkpoints up to the fork point
     existing = {c.step: c for c in history if c.step <= target.step}
@@ -216,10 +270,11 @@ async def _fork_graph(
     state_type = _infer_state_type(graph_def)
 
     # Rewrite the fork target's state
+    fork_run_id = f"fork-{uuid.uuid4().hex[:8]}"
     existing[target.step] = Checkpoint(
         id=checkpoint_id,
         thread_id=new_thread_id,
-        run_id="fork",
+        run_id=fork_run_id,
         graph_name=graph_def.name,
         graph_version=graph_def.version,
         step=target.step,
@@ -255,6 +310,7 @@ async def _fork_graph(
         config=new_config,
         fast_forward_to_step=target.step,
         existing_checkpoints={**existing},
+        parent_run_id=target.run_id,
     )
 
 
@@ -262,36 +318,42 @@ async def _stream_graph(
     graph_def: GraphDef,
     input_state: AgentState,
     config: RunConfig,
-    budget: Optional[Budget] = None,
-) -> AsyncIterator[Any]:
-    """Stream events during graph execution. Uses an async queue."""
-    from dataclasses import dataclass
+    budget: Budget | None = None,
+) -> AsyncIterator[GraphEvent]:
+    """Stream node events in real-time during graph execution.
 
-    @dataclass
-    class GraphEvent:
-        type: str
-        node_name: str
-        state: AgentState
-        error: Optional[str] = None
+    Yields a ``GraphEvent`` immediately after each node completes (or fails),
+    rather than waiting for the entire graph to finish.
+    """
+    queue: asyncio.Queue[GraphEvent | None] = asyncio.Queue(maxsize=512)
 
-    queue: asyncio.Queue[Optional[GraphEvent]] = asyncio.Queue()
+    async def _run_and_signal() -> None:
+        try:
+            await _run_graph(graph_def, input_state, config, budget, stream_queue=queue)
+        finally:
+            await queue.put(None)  # sentinel — signals end of stream
 
-    # We run the graph, but push events into the queue via a patched context
-    # For simplicity, we run the graph and yield the final result
-    # A full implementation would instrument each node to push to the queue
-    result = await _run_graph(graph_def, input_state, config, budget)
+    task = asyncio.create_task(_run_and_signal())
 
-    # Synthesize events from the trace
-    for node_trace in result.trace.nodes_executed:
-        yield GraphEvent(
-            type="node_completed" if node_trace.status == "completed" else "node_failed",
-            node_name=node_trace.node_name,
-            state=result.state,
-            error=node_trace.error,
-        )
+    try:
+        while True:
+            event = await queue.get()
+            if event is None:
+                break
+            yield event
+    finally:
+        # Cancel the background task if the consumer exits early (e.g., break or exception),
+        # otherwise await would deadlock if the queue is full and no one is consuming.
+        if not task.done():
+            task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 # ── Node execution ────────────────────────────────────────────────────────────
+
 
 async def _execute_node_in_context(
     node_def: NodeDef,
@@ -308,7 +370,7 @@ async def _execute_node_in_context(
         return _deserialize_state(cached.state_snapshot, state_type)
 
     # Budget pre-check (wall time)
-    ctx.check_budget(ctx.last_checkpoint_id or "")
+    await ctx.check_budget(ctx.last_checkpoint_id or "")
 
     # Create node trace
     node_trace = NodeTrace(
@@ -327,7 +389,16 @@ async def _execute_node_in_context(
     ctx.current_node_trace = node_trace
 
     try:
-        result = await _execute_with_retry(node_def, state, ctx, node_trace)
+        # Wrap in OTel span if configured
+        if ctx.otel_tracer is not None:
+            with ctx.otel_tracer.start_as_current_span(f"aegis.node.{node_def.name}") as span:
+                span.set_attribute("aegis.node_name", node_def.name)
+                span.set_attribute("aegis.graph_name", ctx.graph_name)
+                span.set_attribute("aegis.run_id", ctx.run_id)
+                span.set_attribute("aegis.step", step)
+                result = await _execute_with_retry(node_def, state, ctx, node_trace)
+        else:
+            result = await _execute_with_retry(node_def, state, ctx, node_trace)
     finally:
         ctx.current_node_name = prev_node_name
         ctx.current_node_trace = prev_node_trace
@@ -343,6 +414,17 @@ async def _execute_node_in_context(
     await ctx.checkpointer.save(ckpt)
     ctx.last_checkpoint_id = ckpt.id
 
+    # Emit streaming event if a consumer is attached
+    if ctx.stream_queue is not None:
+        await ctx.stream_queue.put(
+            GraphEvent(
+                type="node_completed" if node_trace.status == "completed" else "node_failed",
+                node_name=node_def.name,
+                state=result,
+                error=node_trace.error,
+            )
+        )
+
     return result
 
 
@@ -354,7 +436,7 @@ async def _execute_with_retry(
 ) -> AgentState:
     """Execute a node function with retry logic and timeout."""
     max_attempts = node_def.retries + 1
-    last_exc: Optional[BaseException] = None
+    last_exc: BaseException | None = None
 
     for attempt in range(1, max_attempts + 1):
         node_trace.attempt = attempt
@@ -397,7 +479,10 @@ async def _execute_with_retry(
     node_trace.status = "failed"
     node_trace.completed_at = datetime.utcnow()
     node_trace.error = str(last_exc)
-    assert last_exc is not None
+    if last_exc is None:
+        raise RuntimeError(
+            f"Node '{node_def.name}' exhausted all retries but no exception was captured"
+        )
     raise last_exc
 
 
@@ -414,17 +499,24 @@ async def _call_node_fn(
         kwargs["llm"] = LLMContext(ctx)
     if node_def._needs_graphs:
         kwargs["graphs"] = GraphContext(ctx)
-    return await node_def.fn(state, **kwargs)
+    result: AgentState = await node_def.fn(state, **kwargs)
+    if not isinstance(result, AgentState):
+        raise TypeError(
+            f"Node '{node_def.name}' returned {type(result).__name__!r} "
+            f"but must return an AgentState subclass"
+        )
+    return result
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 def _make_checkpoint(
     ctx: RunContext,
     step: int,
     node_name: str,
     state: AgentState,
-    parent_id: Optional[str],
+    parent_id: str | None,
 ) -> Checkpoint:
     state_dict = _serialize_state(state)
     state_hash = hashlib.sha256(
@@ -447,19 +539,25 @@ def _make_checkpoint(
 
 def _serialize_state(state: AgentState) -> dict[str, Any]:
     import dataclasses
+
     return dataclasses.asdict(state)
 
 
-def _deserialize_state(
-    data: dict[str, Any], state_type: type
-) -> AgentState:
+def _deserialize_state(data: dict[str, Any], state_type: type) -> AgentState:
     import dataclasses
+
     known = {f.name for f in dataclasses.fields(state_type)}
-    return state_type(**{k: v for k, v in data.items() if k in known})
+    result: AgentState = state_type(**{k: v for k, v in data.items() if k in known})
+    return result
 
 
 def _infer_state_type(graph_def: GraphDef) -> type:
-    """Infer the AgentState subtype from the graph function's annotations."""
+    """Infer the AgentState subtype from the graph function's annotations.
+
+    Raises ``TypeError`` if no concrete AgentState subclass can be found, rather
+    than silently falling back to bare ``AgentState`` (which would lose all
+    custom fields when deserializing checkpoint data).
+    """
     import inspect
     import typing
 
@@ -474,10 +572,15 @@ def _infer_state_type(graph_def: GraphDef) -> type:
     for key in candidates:
         if key and key in hints:
             t = hints[key]
-            if isinstance(t, type) and issubclass(t, AgentState):
+            if isinstance(t, type) and issubclass(t, AgentState) and t is not AgentState:
                 return t
 
-    return AgentState
+    raise TypeError(
+        f"Cannot infer AgentState subclass for graph '{graph_def.name}'. "
+        "Annotate the graph function's first parameter or return type with your "
+        "AgentState subclass so that checkpoint data can be correctly deserialized "
+        "on resume/fork. Example: `async def my_graph(state: MyState) -> MyState:`"
+    )
 
 
 def _compute_backoff(strategy: str, attempt: int) -> float:
@@ -492,19 +595,21 @@ def _compute_backoff(strategy: str, attempt: int) -> float:
 
 
 def _get_testing_state() -> tuple[
-    Optional[dict[str, Any]],
-    Optional[Any],
-    Optional[str],
-    Optional[Any],
-    Optional[dict[str, Any]],
+    dict[str, Any] | None,
+    Any | None,
+    str | None,
+    Any | None,
+    dict[str, Any] | None,
 ]:
     """Read active testing context (mock_tools / cassette) from contextvars."""
     from .testing._mock_tools import _mock_testing_context
+
     state = _mock_testing_context.get()
     if state is None:
         return None, None, None, None, None
 
     from ._models import MockContext
+
     mock_ctx = MockContext()
     if state.mock_ctx_holder is not None:
         state.mock_ctx_holder.calls = mock_ctx.calls  # share reference

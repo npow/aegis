@@ -5,10 +5,9 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from .._models import Checkpoint
-from ._base import CheckpointerBase
 
 _DEFAULT_DB_PATH = Path.home() / ".aegis" / "checkpoints.db"
 
@@ -16,15 +15,19 @@ _DEFAULT_DB_PATH = Path.home() / ".aegis" / "checkpoints.db"
 class SqliteCheckpointer:
     """Persistent checkpoint store backed by SQLite via aiosqlite.
 
-    Creates the database and table on first use.
+    Uses a single persistent connection per instance (with WAL mode for
+    concurrent read access) to avoid the overhead of opening and closing a
+    new connection on every operation.
     """
 
     def __init__(self, db_path: str | Path = _DEFAULT_DB_PATH) -> None:
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._initialized = False
+        self._db: Any | None = None  # aiosqlite.Connection
 
-    async def _get_db(self) -> "aiosqlite.Connection":
+    async def _get_db(self) -> Any:  # aiosqlite.Connection
+        if self._db is not None:
+            return self._db
         try:
             import aiosqlite  # type: ignore[import]
         except ImportError as exc:
@@ -32,14 +35,16 @@ class SqliteCheckpointer:
                 "aiosqlite is required for SqliteCheckpointer. "
                 "Install it with: pip install aegis[sqlite]"
             ) from exc
+
         db = await aiosqlite.connect(str(self._db_path))
         db.row_factory = aiosqlite.Row
-        if not self._initialized:
-            await self._init_schema(db)
-            self._initialized = True
+        # WAL mode allows concurrent reads while writes are in progress
+        await db.execute("PRAGMA journal_mode=WAL")
+        await self._init_schema(db)
+        self._db = db
         return db
 
-    async def _init_schema(self, db: "aiosqlite.Connection") -> None:
+    async def _init_schema(self, db: Any) -> None:
         await db.execute(
             """
             CREATE TABLE IF NOT EXISTS aegis_checkpoints (
@@ -82,86 +87,75 @@ class SqliteCheckpointer:
 
     async def save(self, checkpoint: Checkpoint) -> None:
         db = await self._get_db()
-        try:
-            await db.execute(
-                """
-                INSERT OR REPLACE INTO aegis_checkpoints
-                  (id, thread_id, run_id, graph_name, graph_version, step,
-                   node_name, state_snapshot, created_at, parent_checkpoint_id,
-                   is_fork_root)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?)
-                """,
-                (
-                    checkpoint.id,
-                    checkpoint.thread_id,
-                    checkpoint.run_id,
-                    checkpoint.graph_name,
-                    checkpoint.graph_version,
-                    checkpoint.step,
-                    checkpoint.node_name,
-                    json.dumps(checkpoint.state_snapshot, default=str),
-                    checkpoint.created_at.isoformat(),
-                    checkpoint.parent_checkpoint_id,
-                    int(checkpoint.is_fork_root),
-                ),
-            )
-            await db.commit()
-        finally:
-            await db.close()
+        await db.execute(
+            """
+            INSERT OR REPLACE INTO aegis_checkpoints
+              (id, thread_id, run_id, graph_name, graph_version, step,
+               node_name, state_snapshot, created_at, parent_checkpoint_id,
+               is_fork_root)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                checkpoint.id,
+                checkpoint.thread_id,
+                checkpoint.run_id,
+                checkpoint.graph_name,
+                checkpoint.graph_version,
+                checkpoint.step,
+                checkpoint.node_name,
+                json.dumps(checkpoint.state_snapshot, default=str),
+                checkpoint.created_at.isoformat(),
+                checkpoint.parent_checkpoint_id,
+                int(checkpoint.is_fork_root),
+            ),
+        )
+        await db.commit()
 
-    async def get_latest(self, thread_id: str, graph_name: str) -> Optional[Checkpoint]:
+    async def get_latest(self, thread_id: str, graph_name: str) -> Checkpoint | None:
         db = await self._get_db()
-        try:
-            async with db.execute(
-                "SELECT * FROM aegis_checkpoints "
-                "WHERE thread_id=? AND graph_name=? "
-                "ORDER BY step DESC LIMIT 1",
-                (thread_id, graph_name),
-            ) as cursor:
-                row = await cursor.fetchone()
-                return self._row_to_checkpoint(row) if row else None
-        finally:
-            await db.close()
+        async with db.execute(
+            "SELECT * FROM aegis_checkpoints "
+            "WHERE thread_id=? AND graph_name=? "
+            "ORDER BY step DESC LIMIT 1",
+            (thread_id, graph_name),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return self._row_to_checkpoint(row) if row else None
 
-    async def get_by_step(
-        self, thread_id: str, graph_name: str, step: int
-    ) -> Optional[Checkpoint]:
+    async def get_by_step(self, thread_id: str, graph_name: str, step: int) -> Checkpoint | None:
         db = await self._get_db()
-        try:
-            async with db.execute(
-                "SELECT * FROM aegis_checkpoints "
-                "WHERE thread_id=? AND graph_name=? AND step=?",
-                (thread_id, graph_name, step),
-            ) as cursor:
-                row = await cursor.fetchone()
-                return self._row_to_checkpoint(row) if row else None
-        finally:
-            await db.close()
+        async with db.execute(
+            "SELECT * FROM aegis_checkpoints WHERE thread_id=? AND graph_name=? AND step=?",
+            (thread_id, graph_name, step),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return self._row_to_checkpoint(row) if row else None
 
-    async def get_history(
-        self, thread_id: str, graph_name: str
-    ) -> list[Checkpoint]:
+    async def get_history(self, thread_id: str, graph_name: str) -> list[Checkpoint]:
         db = await self._get_db()
-        try:
-            async with db.execute(
-                "SELECT * FROM aegis_checkpoints "
-                "WHERE thread_id=? AND graph_name=? ORDER BY step ASC",
-                (thread_id, graph_name),
-            ) as cursor:
-                rows = await cursor.fetchall()
-                return [self._row_to_checkpoint(r) for r in rows]
-        finally:
-            await db.close()
+        async with db.execute(
+            "SELECT * FROM aegis_checkpoints WHERE thread_id=? AND graph_name=? ORDER BY step ASC",
+            (thread_id, graph_name),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [self._row_to_checkpoint(r) for r in rows]
 
     async def delete_thread(self, thread_id: str, graph_name: str) -> None:
         db = await self._get_db()
-        try:
-            await db.execute(
-                "DELETE FROM aegis_checkpoints WHERE thread_id=? AND graph_name=?",
-                (thread_id, graph_name),
-            )
-            await db.commit()
-        finally:
-            await db.close()
+        await db.execute(
+            "DELETE FROM aegis_checkpoints WHERE thread_id=? AND graph_name=?",
+            (thread_id, graph_name),
+        )
+        await db.commit()
 
+    async def close(self) -> None:
+        """Close the underlying SQLite connection. Call on application shutdown."""
+        if self._db is not None:
+            await self._db.close()
+            self._db = None
 
+    async def __aenter__(self) -> SqliteCheckpointer:
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        await self.close()

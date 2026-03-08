@@ -4,89 +4,84 @@ from __future__ import annotations
 
 # Install HTTP intercept at import time (no-op if httpx/requests not installed)
 from ._http_intercept import install as _install_intercept
+
 _install_intercept()
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-from ._models import (
-    # State
-    AgentState,
-    RunConfig,
-    RunResult,
-    RunError,
-    # Checkpointing
-    Checkpoint,
-    CheckpointBackendConfig,
-    # Tracing
-    LLMCall,
-    ToolCall,
-    NodeTrace,
-    RunTrace,
-    # Budget
-    Budget,
-    BudgetStatus,
-    BudgetExceededEvent,
-    BudgetDecision,
-    # Permissions
-    NetworkPermission,
-    FilesystemPermission,
-    ApprovalPolicy,
-    PermissionScope,
-    PermissionViolationEvent,
-    # Testing models
-    CassetteRecord,
-    CassetteEntry,
-    MockCallRecord,
-    MockContext,
-    CassetteReplayContext,
-    # Eval models
-    EvalAssertion,
-    ToolCallAssertion,
-    SchemaAssertion,
-    TraceSnapshotAssertion,
-    EvalCase,
-    EvalCaseResult,
-    EvalSuiteResult,
-    # Exceptions
-    AegisError,
-    BudgetExceededError,
-    PermissionDeniedError,
-    AegisCassetteStaleError,
-    EvalGateFailure,
-    GraphVersionConflict,
-    NoCheckpointError,
-    LLMNotConfiguredError,
+# Configuration helper (global defaults)
+from ._config import OTelTracer, PostgresCheckpointer, configure  # noqa: E402
+from ._context import (  # noqa: E402
+    GraphContext,
+    LLMContext,
+    LLMResponse,
+    ToolContext,
 )
-
-from ._decorators import (
-    graph,
-    node,
-    tool,
+from ._decorators import (  # noqa: E402
     GraphDef,
     NodeDef,
     ToolDef,
-    get_tool_registry,
     get_graph_registry,
+    get_tool_registry,
+    graph,
+    node,
+    tool,
 )
-
-from ._context import (
-    ToolContext,
-    LLMContext,
-    GraphContext,
-    LLMResponse,
+from ._models import (  # noqa: E402
+    AegisCassetteStaleError,
+    # Exceptions
+    AegisError,
+    # State
+    AgentState,
+    ApprovalPolicy,
+    # Budget
+    Budget,
+    BudgetDecision,
+    BudgetExceededError,
+    BudgetExceededEvent,
+    BudgetStatus,
+    CassetteEntry,
+    # Testing models
+    CassetteRecord,
+    CassetteReplayContext,
+    # Checkpointing
+    Checkpoint,
+    CheckpointBackendConfig,
+    # Eval models
+    EvalAssertion,
+    EvalCase,
+    EvalCaseResult,
+    EvalGateFailure,
+    EvalSuiteResult,
+    FilesystemPermission,
+    GraphVersionConflict,
+    # Tracing
+    LLMCall,
+    LLMNotConfiguredError,
+    MockCallRecord,
+    MockContext,
+    # Permissions
+    NetworkPermission,
+    NoCheckpointError,
+    NodeTrace,
+    PermissionDeniedError,
+    PermissionScope,
+    PermissionViolationEvent,
+    RunConfig,
+    RunError,
+    RunResult,
+    RunTrace,
+    SchemaAssertion,
+    ToolCall,
+    ToolCallAssertion,
+    TraceSnapshotAssertion,
 )
-
-from ._multi_agent import chain, parallel, supervisor
-
-from .checkpointers import (
+from ._multi_agent import chain, parallel, supervisor  # noqa: E402
+from .checkpointers import (  # noqa: E402
     CheckpointerBase,
     MemoryCheckpointer,
     SqliteCheckpointer,
 )
-
-# Configuration helper (global defaults)
-from ._config import configure, PostgresCheckpointer, OTelTracer
-
 
 __all__ = [
     # State

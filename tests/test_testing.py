@@ -11,8 +11,8 @@ from aegis import AgentState, RunConfig, graph, node, tool
 from aegis.checkpointers import MemoryCheckpointer
 from aegis.testing import MockTool, cassette
 
-
 # ── MockTool unit tests ───────────────────────────────────────────────────────
+
 
 async def test_mock_tool_returns_fixed_value():
     mock = MockTool.returns(["result1", "result2"])
@@ -54,6 +54,7 @@ async def test_mock_tool_calls_side_effect():
 
 # ── MockTools context manager integration ────────────────────────────────────
 
+
 @dataclass
 class MockState(AgentState):
     query: str = ""
@@ -79,9 +80,11 @@ async def mock_test_graph(state: MockState) -> MockState:
 
 async def test_mock_tools_intercepts_tool_call():
     cp = MemoryCheckpointer()
-    async with mock_test_graph.mock_tools({
-        "mock_search_v1": MockTool.returns("mocked result"),
-    }) as ctx:
+    async with mock_test_graph.mock_tools(
+        {
+            "mock_search_v1": MockTool.returns("mocked result"),
+        }
+    ):
         result = await mock_test_graph.run(
             input=MockState(query="quantum computing"),
             config=RunConfig(thread_id="mock-ctx-001", checkpointer=cp),
@@ -93,9 +96,11 @@ async def test_mock_tools_intercepts_tool_call():
 
 async def test_mock_tools_records_call_count():
     cp = MemoryCheckpointer()
-    async with mock_test_graph.mock_tools({
-        "mock_search_v1": MockTool.returns("x"),
-    }) as ctx:
+    async with mock_test_graph.mock_tools(
+        {
+            "mock_search_v1": MockTool.returns("x"),
+        }
+    ) as ctx:
         await mock_test_graph.run(
             input=MockState(query="test"),
             config=RunConfig(thread_id="mock-count-001", checkpointer=cp),
@@ -106,9 +111,11 @@ async def test_mock_tools_records_call_count():
 
 async def test_mock_tools_records_call_args():
     cp = MemoryCheckpointer()
-    async with mock_test_graph.mock_tools({
-        "mock_search_v1": MockTool.returns("y"),
-    }) as ctx:
+    async with mock_test_graph.mock_tools(
+        {
+            "mock_search_v1": MockTool.returns("y"),
+        }
+    ) as ctx:
         await mock_test_graph.run(
             input=MockState(query="hello world"),
             config=RunConfig(thread_id="mock-args-001", checkpointer=cp),
@@ -121,9 +128,11 @@ async def test_mock_tools_records_call_args():
 async def test_mock_tools_live_calls_made_is_zero():
     """No real tool execution should happen inside mock_tools context."""
     cp = MemoryCheckpointer()
-    async with mock_test_graph.mock_tools({
-        "mock_search_v1": MockTool.returns("ok"),
-    }) as ctx:
+    async with mock_test_graph.mock_tools(
+        {
+            "mock_search_v1": MockTool.returns("ok"),
+        }
+    ):
         result = await mock_test_graph.run(
             input=MockState(query="test"),
             config=RunConfig(thread_id="live-zero-001", checkpointer=cp),
@@ -135,9 +144,11 @@ async def test_mock_tools_live_calls_made_is_zero():
 
 async def test_mock_tools_error_propagates():
     cp = MemoryCheckpointer()
-    async with mock_test_graph.mock_tools({
-        "mock_search_v1": MockTool.raises(ConnectionError("network down")),
-    }):
+    async with mock_test_graph.mock_tools(
+        {
+            "mock_search_v1": MockTool.raises(ConnectionError("network down")),
+        }
+    ):
         result = await mock_test_graph.run(
             input=MockState(query="test"),
             config=RunConfig(thread_id="mock-err-001", checkpointer=cp),
@@ -147,6 +158,7 @@ async def test_mock_tools_error_propagates():
 
 
 # ── Cassette record/replay integration ───────────────────────────────────────
+
 
 @dataclass
 class CassetteState(AgentState):
@@ -175,10 +187,12 @@ async def test_cassette_record_creates_file():
     with tempfile.TemporaryDirectory() as tmpdir:
         path = f"{tmpdir}/test.json"
         async with cassette.record(path):
-            async with cassette_test_graph.mock_tools({
-                "cassette_tool_v1": MockTool.returns("recorded answer"),
-            }):
-                result = await cassette_test_graph.run(
+            async with cassette_test_graph.mock_tools(
+                {
+                    "cassette_tool_v1": MockTool.returns("recorded answer"),
+                }
+            ):
+                await cassette_test_graph.run(
                     input=CassetteState(query="what is AI"),
                     config=RunConfig(thread_id="cassette-record-001", checkpointer=cp),
                 )
@@ -200,16 +214,18 @@ async def test_cassette_replay_serves_tool_calls():
 
         # Record
         async with cassette.record(path):
-            async with cassette_test_graph.mock_tools({
-                "cassette_tool_v1": MockTool.returns("replay answer"),
-            }):
+            async with cassette_test_graph.mock_tools(
+                {
+                    "cassette_tool_v1": MockTool.returns("replay answer"),
+                }
+            ):
                 await cassette_test_graph.run(
                     input=CassetteState(query="AI"),
                     config=RunConfig(thread_id="cassette-record-002", checkpointer=cp1),
                 )
 
         # Replay — no mock_tools needed; cassette serves the tool call
-        async with cassette.replay(path) as ctx:
+        async with cassette.replay(path):
             result = await cassette_test_graph.run(
                 input=CassetteState(query="AI"),
                 config=RunConfig(thread_id="cassette-replay-002", checkpointer=cp2),
@@ -229,9 +245,11 @@ async def test_cassette_replay_with_override():
 
         # Record
         async with cassette.record(path):
-            async with cassette_test_graph.mock_tools({
-                "cassette_tool_v1": MockTool.returns("ok answer"),
-            }):
+            async with cassette_test_graph.mock_tools(
+                {
+                    "cassette_tool_v1": MockTool.returns("ok answer"),
+                }
+            ):
                 await cassette_test_graph.run(
                     input=CassetteState(query="test"),
                     config=RunConfig(thread_id="override-record", checkpointer=cp1),

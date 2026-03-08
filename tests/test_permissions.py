@@ -1,7 +1,6 @@
 """Tests for permission scope enforcement."""
 
 from dataclasses import dataclass
-from datetime import datetime
 
 import pytest
 
@@ -17,17 +16,17 @@ from aegis import (
     tool,
 )
 from aegis._permissions import (
+    _domain_matches_any,
+    _path_matches_any,
     check_filesystem_permission,
     check_network_permission,
     check_tool_permission,
-    _domain_matches_any,
-    _path_matches_any,
 )
 from aegis.checkpointers import MemoryCheckpointer
 from aegis.testing import MockTool
 
-
 # ── Unit tests for permission helpers ─────────────────────────────────────────
+
 
 def test_domain_matching_exact():
     assert _domain_matches_any("arxiv.org", ["arxiv.org"]) is True
@@ -115,14 +114,13 @@ def test_check_filesystem_permission_blocks_unlisted_path():
 
 
 def test_check_filesystem_permission_blocks_write_when_disabled():
-    scope = PermissionScope(
-        filesystem=FilesystemPermission(write=False)
-    )
+    scope = PermissionScope(filesystem=FilesystemPermission(write=False))
     with pytest.raises(PermissionDeniedError):
         check_filesystem_permission("/tmp/anything", "write", scope, "r1", "t1", "node")
 
 
 # ── Integration: permission scope enforced during graph run ───────────────────
+
 
 @dataclass
 class PermState(AgentState):
@@ -162,13 +160,16 @@ async def test_graph_blocks_non_whitelisted_tool_in_scope():
     )
     assert result.status == "failed"
     assert result.error is not None
-    assert "Permission denied" in result.error.message or "tool_not_in_whitelist" in result.error.message
+    assert (
+        "Permission denied" in result.error.message
+        or "tool_not_in_whitelist" in result.error.message
+    )
 
 
 async def test_graph_allows_whitelisted_tool_in_scope():
     @node()
     async def call_allowed(state: PermState, tools) -> PermState:
-        result = await tools.allowed_tool_perm_test()
+        await tools.allowed_tool_perm_test()
         return state.update(done=True)
 
     @graph(

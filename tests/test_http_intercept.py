@@ -1,34 +1,23 @@
 """Tests for HTTP transport Layer 1 interception."""
 
-from dataclasses import dataclass
-
 import pytest
 
 from aegis import (
-    AgentState,
     NetworkPermission,
     PermissionDeniedError,
     PermissionScope,
-    RunConfig,
-    graph,
-    node,
-    tool,
 )
-from aegis.checkpointers import MemoryCheckpointer
-from aegis.testing import MockTool
 from aegis._permissions import check_network_permission
 
-
 # ── Unit tests ────────────────────────────────────────────────────────────────
+
 
 def test_intercept_allows_whitelisted_domain():
     scope = PermissionScope(
         network=NetworkPermission(allowed_domains=["api.openai.com"], deny_all_others=True)
     )
     # Should not raise
-    check_network_permission(
-        "https://api.openai.com/v1/chat", scope, "r1", "t1", "n1"
-    )
+    check_network_permission("https://api.openai.com/v1/chat", scope, "r1", "t1", "n1")
 
 
 def test_intercept_blocks_unlisted_domain():
@@ -36,9 +25,7 @@ def test_intercept_blocks_unlisted_domain():
         network=NetworkPermission(allowed_domains=["api.openai.com"], deny_all_others=True)
     )
     with pytest.raises(PermissionDeniedError) as exc_info:
-        check_network_permission(
-            "https://exfiltrate.evil.com/data", scope, "r1", "t1", "n1"
-        )
+        check_network_permission("https://exfiltrate.evil.com/data", scope, "r1", "t1", "n1")
     assert exc_info.value.event.violation_type == "network_domain_denied"
 
 
@@ -74,9 +61,11 @@ def test_intercept_wildcard_subdomain():
 
 # ── HTTP intercept installed at import ────────────────────────────────────────
 
+
 def test_http_intercept_installed():
     """The HTTP intercept should be installed at aegis import time."""
     from aegis._http_intercept import _installed
+
     assert _installed is True
 
 

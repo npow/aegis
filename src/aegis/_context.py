@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 from ._models import (
     AgentState,
@@ -22,19 +23,18 @@ from ._models import (
 )
 
 if TYPE_CHECKING:
-    from ._models import Budget, CassetteRecord, MockContext
+    from ._models import Budget, CassetteRecord, MockContext, RunConfig
     from .checkpointers._base import CheckpointerBase
     from .testing._mock_tools import MockTool
 
 
 # ── Active run contextvar ─────────────────────────────────────────────────────
 
-_run_context: ContextVar[Optional["RunContext"]] = ContextVar(
-    "aegis_run_context", default=None
-)
+_run_context: ContextVar[RunContext | None] = ContextVar("aegis_run_context", default=None)
 
 
 # ── RunContext ────────────────────────────────────────────────────────────────
+
 
 @dataclass
 class RunContext:
@@ -44,43 +44,50 @@ class RunContext:
     thread_id: str
     graph_name: str
     graph_version: str
-    checkpointer: "CheckpointerBase"
+    checkpointer: CheckpointerBase
     trace: RunTrace
-    permission_scope: Optional[PermissionScope]
-    budget: Optional["Budget"]
+    permission_scope: PermissionScope | None
+    budget: Budget | None
 
     # Tool registry: tool_name -> ToolDef
     tool_registry: dict[str, Any] = field(default_factory=dict)
 
     # Mock overrides: tool_name -> MockTool (set via mock_tools() context)
-    mock_tools: Optional[dict[str, "MockTool"]] = None
-    mock_ctx: Optional["MockContext"] = None
+    mock_tools: dict[str, MockTool] | None = None
+    mock_ctx: MockContext | None = None
 
     # Cassette state
-    cassette_mode: Optional[str] = None          # "record" | "replay" | None
-    cassette: Optional["CassetteRecord"] = None
-    cassette_index: int = 0                       # next entry to serve in replay
-    cassette_override_tools: Optional[dict[str, "MockTool"]] = None
+    cassette_mode: str | None = None  # "record" | "replay" | None
+    cassette: CassetteRecord | None = None
+    cassette_index: int = 0  # next entry to serve in replay
+    cassette_override_tools: dict[str, MockTool] | None = None
 
     # Step tracking
     _step_counter: int = 0
-    _fast_forward_to_step: int = -1              # replay through this step
+    _fast_forward_to_step: int = -1  # replay through this step
     _existing_checkpoints: dict[int, Any] = field(default_factory=dict)
-    last_checkpoint_id: Optional[str] = None
+    last_checkpoint_id: str | None = None
 
     # Budget tracking (mutable)
     _budget_start_time: float = field(default_factory=time.monotonic)
     _budget_tokens_used: int = 0
     _budget_cost_usd: float = 0.0
     _budget_tool_calls: int = 0
-    _budget_exceeded_handler: Optional[Any] = None  # async callable
+    _budget_exceeded_handler: Any | None = None  # async callable
+    _downgraded: bool = False  # True once downgrade_model policy fires
 
     # Current node context
-    current_node_name: Optional[str] = None
-    current_node_trace: Optional[NodeTrace] = None
+    current_node_name: str | None = None
+    current_node_trace: NodeTrace | None = None
 
     # LLM model override (for downgrade_model budget policy)
-    llm_model_override: Optional[str] = None
+    llm_model_override: str | None = None
+
+    # Streaming: optional queue for real-time node events
+    stream_queue: asyncio.Queue | None = None  # type: ignore[type-arg]
+
+    # OTel tracer (opentelemetry Tracer instance, if configured)
+    otel_tracer: Any | None = None
 
     def next_step(self) -> int:
         step = self._step_counter
@@ -99,40 +106,82 @@ class RunContext:
             status.compute_pct(self.budget)
         return status
 
-    def check_budget(self, checkpoint_id: str = "") -> None:
-        """Raise BudgetExceededError if any budget dimension is exceeded."""
+    async def check_budget(self, checkpoint_id: str = "") -> None:
+        """Raise BudgetExceededError (or apply policy) if any budget dimension is exceeded."""
         if not self.budget:
             return
         status = self.budget_status()
-        exceeded: Optional[str] = None
+        exceeded: str | None = None
 
         if self.budget.max_tokens is not None and status.tokens_used > self.budget.max_tokens:
             exceeded = "tokens"
-        elif self.budget.max_llm_cost_usd is not None and status.cost_usd > self.budget.max_llm_cost_usd:
+        elif (
+            self.budget.max_llm_cost_usd is not None
+            and status.cost_usd > self.budget.max_llm_cost_usd
+        ):
             exceeded = "cost"
-        elif self.budget.max_tool_calls is not None and status.tool_calls_made > self.budget.max_tool_calls:
+        elif (
+            self.budget.max_tool_calls is not None
+            and status.tool_calls_made > self.budget.max_tool_calls
+        ):
             exceeded = "tool_calls"
         elif self.budget.max_wall_time_seconds is not None:
             elapsed = time.monotonic() - self._budget_start_time
             if elapsed > self.budget.max_wall_time_seconds:
                 exceeded = "wall_time"
 
-        if exceeded:
-            from ._models import BudgetExceededEvent
-            event = BudgetExceededEvent(
-                run_id=self.run_id,
-                thread_id=self.thread_id,
-                exceeded_dimension=exceeded,
-                budget=self.budget,
-                current_status=status,
-                checkpoint_id=checkpoint_id or self.last_checkpoint_id or "",
-            )
-            raise BudgetExceededError(event)
+        if not exceeded:
+            return
+
+        from ._models import BudgetExceededEvent
+
+        event = BudgetExceededEvent(
+            run_id=self.run_id,
+            thread_id=self.thread_id,
+            exceeded_dimension=exceeded,
+            budget=self.budget,
+            current_status=status,
+            checkpoint_id=checkpoint_id or self.last_checkpoint_id or "",
+        )
+
+        policy = self.budget.on_exceeded
+
+        # ── downgrade_model ────────────────────────────────────────────────────
+        if policy == "downgrade_model":
+            if not self._downgraded and self.budget.downgrade_to:
+                self._downgraded = True
+                self.llm_model_override = self.budget.downgrade_to
+            # Don't raise — continue with the downgraded model
+            return
+
+        # ── pause_and_notify / hard_stop / compress_context ────────────────────
+        # Call user-registered handler if present; honour its BudgetDecision.
+        if self._budget_exceeded_handler is not None:
+            try:
+                decision = await self._budget_exceeded_handler(event)
+                if decision is not None:
+                    if decision.action == "extend" and decision.updated_budget is not None:
+                        self.budget = decision.updated_budget
+                        return
+                    elif decision.action == "downgrade":
+                        if decision.updated_budget and decision.updated_budget.downgrade_to:
+                            self.llm_model_override = decision.updated_budget.downgrade_to
+                        return
+                    # else "hard_stop" — fall through to raise
+            except Exception as handler_exc:
+                import warnings
+
+                warnings.warn(
+                    f"Budget exceeded handler raised {type(handler_exc).__name__}: {handler_exc}. "
+                    "Falling back to BudgetExceededError.",
+                    stacklevel=2,
+                )
+
+        raise BudgetExceededError(event)
 
     async def execute_tool(self, tool_name: str, kwargs: dict[str, Any]) -> Any:
         """Dispatch a tool call through permission checks, mocks, cassette, and real execution."""
         import time as _time
-        from datetime import datetime
 
         start = _time.monotonic()
         node_name = self.current_node_name or "unknown"
@@ -140,14 +189,12 @@ class RunContext:
 
         # Track budget for ALL tool calls (mocked or real) before dispatch
         self._budget_tool_calls += 1
-        self.check_budget(self.last_checkpoint_id or "")
+        await self.check_budget(self.last_checkpoint_id or "")
 
         # 1. Cassette override_tools take highest priority
         if self.cassette_override_tools and tool_name in self.cassette_override_tools:
             mock = self.cassette_override_tools[tool_name]
-            return await self._execute_mock_tool(
-                tool_name, kwargs, mock, call_id, node_name, start
-            )
+            return await self._execute_mock_tool(tool_name, kwargs, mock, call_id, node_name, start)
 
         # 2. mock_tools() context
         if self.mock_tools and tool_name in self.mock_tools:
@@ -158,7 +205,9 @@ class RunContext:
 
         # 3. Cassette replay
         if self.cassette_mode == "replay" and self.cassette:
-            return await self._serve_tool_from_cassette(tool_name, kwargs, call_id, node_name, start)
+            return await self._serve_tool_from_cassette(
+                tool_name, kwargs, call_id, node_name, start
+            )
 
         # 4. Permission check
         self._check_tool_permission(tool_name, node_name)
@@ -168,7 +217,7 @@ class RunContext:
         if tool_def is None:
             raise KeyError(f"Tool '{tool_name}' not found in registry")
 
-        error: Optional[str] = None
+        error: str | None = None
         result: Any = None
         try:
             result = await tool_def.fn(**kwargs)
@@ -195,6 +244,7 @@ class RunContext:
             # Record in cassette if recording
             if self.cassette_mode == "record" and self.cassette is not None:
                 from ._models import CassetteEntry
+
                 entry = CassetteEntry(
                     type="tool_call",
                     call_id=call_id,
@@ -212,16 +262,15 @@ class RunContext:
         self,
         tool_name: str,
         kwargs: dict[str, Any],
-        mock: "MockTool",
+        mock: MockTool,
         call_id: str,
         node_name: str,
         start: float,
         record_in_mock_ctx: bool = False,
     ) -> Any:
         import time as _time
-        from datetime import datetime
 
-        error: Optional[str] = None
+        error: str | None = None
         result: Any = None
         try:
             result = await mock.execute(kwargs)
@@ -249,6 +298,7 @@ class RunContext:
 
             if record_in_mock_ctx and self.mock_ctx is not None:
                 from ._models import MockCallRecord
+
                 if tool_name not in self.mock_ctx.calls:
                     self.mock_ctx.calls[tool_name] = MockCallRecord(tool_name=tool_name)
                 rec = self.mock_ctx.calls[tool_name]
@@ -258,6 +308,7 @@ class RunContext:
             # Record mock result in cassette if we're in record mode
             if self.cassette_mode == "record" and self.cassette is not None:
                 from ._models import CassetteEntry
+
                 cassette_entry = CassetteEntry(
                     type="tool_call",
                     call_id=call_id,
@@ -278,10 +329,11 @@ class RunContext:
         start: float,
     ) -> Any:
         import time as _time
-        from datetime import datetime
+
         from ._models import AegisCassetteStaleError
 
-        assert self.cassette is not None
+        if self.cassette is None:  # pragma: no cover
+            raise RuntimeError("_serve_tool_from_cassette called without active cassette")
         # Find next tool_call entry in cassette
         entries = self.cassette.entries
         idx = self.cassette_index
@@ -295,6 +347,7 @@ class RunContext:
 
         entry = entries[idx]
         self.cassette_index = idx + 1
+        self._sync_cassette_index()
 
         # Validate tool name match
         recorded_tool = entry.request.get("tool_name")
@@ -324,13 +377,23 @@ class RunContext:
             self.current_node_trace.tool_calls.append(tc)
         return result
 
+    def _sync_cassette_index(self) -> None:
+        """Propagate cassette_index back to the testing context's mutable tracker."""
+        from .testing._mock_tools import _mock_testing_context
+
+        ts = _mock_testing_context.get()
+        if ts is not None:
+            ts.cassette_index_ref[0] = self.cassette_index
+
     def _check_tool_permission(self, tool_name: str, node_name: str) -> None:
         if not self.permission_scope:
             return
         scope = self.permission_scope
         if scope.tools is not None and tool_name not in scope.tools:
             from datetime import datetime
-            from ._models import PermissionViolationEvent, PermissionDeniedError
+
+            from ._models import PermissionDeniedError, PermissionViolationEvent
+
             event = PermissionViolationEvent(
                 run_id=self.run_id,
                 thread_id=self.thread_id,
@@ -346,12 +409,11 @@ class RunContext:
         self,
         model: str,
         prompt: str,
-        system: Optional[str] = None,
+        system: str | None = None,
         **kwargs: Any,
-    ) -> "LLMResponse":
+    ) -> LLMResponse:
         """Execute an LLM call, serving from cassette if in replay mode."""
         import time as _time
-        from datetime import datetime
 
         # Apply model override from budget downgrade
         effective_model = self.llm_model_override or model
@@ -362,17 +424,17 @@ class RunContext:
         # Cassette replay
         if self.cassette_mode == "replay" and self.cassette:
             return await self._serve_llm_from_cassette(
-                effective_model, prompt, system, call_id, node_name, start
+                effective_model, prompt, system, call_id, node_name, start, kwargs
             )
 
         # Live LLM call — try litellm
         try:
             import litellm  # type: ignore[import]
-        except ImportError:
+        except ImportError as exc:
             raise LLMNotConfiguredError(
                 "No LLM provider configured. Install aegis[litellm] and set your API key, "
                 "or use cassette replay / mock_tools() for testing."
-            )
+            ) from exc
 
         messages = []
         if system:
@@ -402,11 +464,12 @@ class RunContext:
             node_name=node_name,
         )
 
-        self._record_llm_call(llm_call)
+        await self._record_llm_call(llm_call)
 
         # Record in cassette if recording
         if self.cassette_mode == "record" and self.cassette is not None:
             from ._models import CassetteEntry
+
             entry = CassetteEntry(
                 type="llm_call",
                 call_id=call_id,
@@ -416,8 +479,12 @@ class RunContext:
                     {"model": effective_model, "system": system, "prompt": prompt, **kwargs}
                 ),
                 response=_safe_serialize(
-                    {"text": text, "input_tokens": input_tokens,
-                     "output_tokens": output_tokens, "cost_usd": cost_usd}
+                    {
+                        "text": text,
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "cost_usd": cost_usd,
+                    }
                 ),
                 timestamp=datetime.utcnow(),
             )
@@ -429,16 +496,18 @@ class RunContext:
         self,
         model: str,
         prompt: str,
-        system: Optional[str],
+        system: str | None,
         call_id: str,
         node_name: str,
         start: float,
-    ) -> "LLMResponse":
+        extra_kwargs: dict[str, Any] | None = None,
+    ) -> LLMResponse:
         import time as _time
-        from datetime import datetime
-        from ._models import AegisCassetteStaleError, CassetteEntry
 
-        assert self.cassette is not None
+        from ._models import AegisCassetteStaleError
+
+        if self.cassette is None:  # pragma: no cover
+            raise RuntimeError("_serve_llm_from_cassette called without active cassette")
         entries = self.cassette.entries
         idx = self.cassette_index
         while idx < len(entries) and entries[idx].type != "llm_call":
@@ -450,15 +519,18 @@ class RunContext:
 
         entry = entries[idx]
         self.cassette_index = idx + 1
+        self._sync_cassette_index()
 
-        # Stale detection: compare prompt hash
+        # Stale detection: compare request hash (model + prompts + extra kwargs)
         import hashlib
-        current_req = {"model": model, "system": system, "prompt": prompt}
+        import json as _json
+
+        current_req = {"model": model, "system": system, "prompt": prompt, **(extra_kwargs or {})}
         current_hash = hashlib.sha256(
-            str(sorted(current_req.items())).encode()
+            _json.dumps(current_req, sort_keys=True, default=str).encode()
         ).hexdigest()[:16]
         recorded_hash = hashlib.sha256(
-            str(sorted(entry.request.items())).encode()
+            _json.dumps(entry.request, sort_keys=True, default=str).encode()
         ).hexdigest()[:16]
 
         if current_hash != recorded_hash:
@@ -487,19 +559,20 @@ class RunContext:
             node_name=node_name,
             was_replayed=True,
         )
-        self._record_llm_call(llm_call)
+        await self._record_llm_call(llm_call)
         return LLMResponse(text=resp.get("text", ""), call=llm_call)
 
-    def _record_llm_call(self, llm_call: LLMCall) -> None:
+    async def _record_llm_call(self, llm_call: LLMCall) -> None:
         self._budget_tokens_used += llm_call.input_tokens + llm_call.output_tokens
         self._budget_cost_usd += llm_call.cost_usd
         self.trace.add_llm_call(llm_call)
         if self.current_node_trace:
             self.current_node_trace.llm_calls.append(llm_call)
-        self.check_budget(self.last_checkpoint_id or "")
+        await self.check_budget(self.last_checkpoint_id or "")
 
 
 # ── LLM Response ──────────────────────────────────────────────────────────────
+
 
 @dataclass
 class LLMResponse:
@@ -508,6 +581,7 @@ class LLMResponse:
 
 
 # ── ToolContext ───────────────────────────────────────────────────────────────
+
 
 class ToolContext:
     """Injected into node functions via 'tools' parameter.
@@ -531,6 +605,7 @@ class ToolContext:
 
 # ── LLMContext ────────────────────────────────────────────────────────────────
 
+
 class LLMContext:
     """Injected into node functions via 'llm' parameter."""
 
@@ -541,15 +616,14 @@ class LLMContext:
         self,
         model: str,
         prompt: str,
-        system: Optional[str] = None,
+        system: str | None = None,
         **kwargs: Any,
     ) -> LLMResponse:
-        return await self._ctx.execute_llm_call(
-            model=model, prompt=prompt, system=system, **kwargs
-        )
+        return await self._ctx.execute_llm_call(model=model, prompt=prompt, system=system, **kwargs)
 
 
 # ── GraphContext ──────────────────────────────────────────────────────────────
+
 
 class GraphContext:
     """Injected into node functions via 'graphs' parameter.
@@ -570,16 +644,17 @@ class GraphContext:
         if graph_def is None:
             raise KeyError(f"Graph '{name}' not found in registry")
 
+        _gdef = graph_def  # narrow to non-Optional for closure
+
         class _SubGraphProxy:
-            async def run(proxy_self, input: AgentState, config: "RunConfig", **kw: Any) -> Any:  # noqa: N805
-                from ._models import RunConfig as _RC
-                # Propagate parent run_id for trace nesting
-                return await graph_def.run(input=input, config=config, **kw)
+            async def run(proxy_self, input: AgentState, config: RunConfig, **kw: Any) -> Any:  # noqa: N805
+                return await _gdef.run(input=input, config=config, **kw)
 
         return _SubGraphProxy()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 def _safe_serialize(obj: Any) -> Any:
     """Best-effort JSON-safe serialization."""
@@ -591,7 +666,8 @@ def _safe_serialize(obj: Any) -> Any:
         return [_safe_serialize(v) for v in obj]
     try:
         import dataclasses as dc
-        if dc.is_dataclass(obj):
+
+        if dc.is_dataclass(obj) and not isinstance(obj, type):
             return dc.asdict(obj)
     except Exception:
         pass

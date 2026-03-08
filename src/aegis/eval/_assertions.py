@@ -19,22 +19,22 @@ from .._models import (
 def evaluate_assertion(
     assertion: EvalAssertion,
     final_state: AgentState,
-    trace: RunTrace,
+    trace: RunTrace | None,
 ) -> tuple[bool, str]:
     """Evaluate a single assertion. Returns (passed, message)."""
+    if isinstance(assertion, (ToolCallAssertion, TraceSnapshotAssertion)) and trace is None:
+        return False, f"Cannot evaluate {type(assertion).__name__}: trace is None (graph failed)"
     if isinstance(assertion, ToolCallAssertion):
-        return _evaluate_tool_call(assertion, trace)
+        return _evaluate_tool_call(assertion, trace)  # type: ignore[arg-type]
     elif isinstance(assertion, SchemaAssertion):
         return _evaluate_schema(assertion, final_state)
     elif isinstance(assertion, TraceSnapshotAssertion):
-        return _evaluate_trace_snapshot(assertion, trace)
+        return _evaluate_trace_snapshot(assertion, trace)  # type: ignore[arg-type]
     else:
         return False, f"Unknown assertion type: {type(assertion).__name__}"
 
 
-def _evaluate_tool_call(
-    assertion: ToolCallAssertion, trace: RunTrace
-) -> tuple[bool, str]:
+def _evaluate_tool_call(assertion: ToolCallAssertion, trace: RunTrace) -> tuple[bool, str]:
     all_tool_calls = [
         tc
         for node in trace.nodes_executed
@@ -49,7 +49,10 @@ def _evaluate_tool_call(
             f"(expected at least {assertion.min_times} time(s))"
         )
     if not assertion.called and call_count > 0:
-        return False, f"Tool '{assertion.tool_name}' was called {call_count} time(s) but expected not to be"
+        return (
+            False,
+            f"Tool '{assertion.tool_name}' was called {call_count} time(s) but expected not to be",
+        )
 
     if call_count < assertion.min_times:
         return False, (
@@ -64,20 +67,27 @@ def _evaluate_tool_call(
         )
 
     if assertion.args_match:
-        for tc in all_tool_calls:
-            for k, v in assertion.args_match.items():
-                if tc.args.get(k) != v:
-                    return False, (
-                        f"Tool '{assertion.tool_name}' call args mismatch: "
-                        f"expected args['{k}']={v!r}, got {tc.args.get(k)!r}"
-                    )
+        # At least one call must satisfy ALL of the expected args
+        matching = [
+            tc
+            for tc in all_tool_calls
+            if all(tc.args.get(k) == v for k, v in assertion.args_match.items())
+        ]
+        if not matching:
+            expected_str = ", ".join(f"{k}={v!r}" for k, v in assertion.args_match.items())
+            actual_str = "; ".join(
+                "{" + ", ".join(f"{k}={tc.args.get(k)!r}" for k in assertion.args_match) + "}"
+                for tc in all_tool_calls
+            )
+            return False, (
+                f"Tool '{assertion.tool_name}': no call matched args_match {{{expected_str}}}. "
+                f"Actual call args: [{actual_str}]"
+            )
 
     return True, assertion.description or f"Tool '{assertion.tool_name}' called correctly"
 
 
-def _evaluate_schema(
-    assertion: SchemaAssertion, final_state: AgentState
-) -> tuple[bool, str]:
+def _evaluate_schema(assertion: SchemaAssertion, final_state: AgentState) -> tuple[bool, str]:
     try:
         result = assertion.predicate(final_state)
     except Exception as exc:
@@ -111,9 +121,7 @@ def _evaluate_trace_snapshot(
     a_seq = [e["tool_name"] for e in actual]
     if g_seq != a_seq:
         return False, (
-            f"Tool call sequence diverged from golden.\n"
-            f"  Expected: {g_seq}\n"
-            f"  Actual:   {a_seq}"
+            f"Tool call sequence diverged from golden.\n  Expected: {g_seq}\n  Actual:   {a_seq}"
         )
     return False, (
         f"Trace args diverged from golden (same tool order). "
@@ -121,9 +129,7 @@ def _evaluate_trace_snapshot(
     )
 
 
-def _trace_to_comparable(
-    trace: RunTrace, normalize_fields: list[str]
-) -> list[dict[str, Any]]:
+def _trace_to_comparable(trace: RunTrace, normalize_fields: list[str]) -> list[dict[str, Any]]:
     """Flatten tool calls to a normalized list for comparison."""
     entries = []
     for node in trace.nodes_executed:

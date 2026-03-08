@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, AsyncIterator, Optional
+from typing import Any
 
 from .._models import CassetteRecord, CassetteReplayContext
-from ._mock_tools import MockTool, _TestingState, _mock_testing_context
+from ._mock_tools import MockTool, _mock_testing_context, _TestingState
 
 
 class _CassetteNS:
@@ -41,7 +42,7 @@ class _CassetteNS:
     async def replay(
         self,
         path: str,
-        override_tools: Optional[dict[str, MockTool]] = None,
+        override_tools: dict[str, MockTool] | None = None,
     ) -> AsyncIterator[CassetteReplayContext]:
         """Context manager: serve all LLM and tool calls from a cassette file."""
         cassette = _load_cassette(path)
@@ -53,19 +54,22 @@ class _CassetteNS:
             cassette_mode="replay",
             cassette=cassette,
             cassette_override_tools=override_tools,
+            # cassette_index_ref starts at [0] — updated by RunContext as entries are served
         )
         token = _mock_testing_context.set(state)
         try:
             yield replay_ctx
         finally:
             _mock_testing_context.reset(token)
-            replay_ctx.replay_calls_served = cassette.entries.__len__()
+            # Use the actual served count tracked by RunContext via cassette_index_ref
+            replay_ctx.replay_calls_served = state.cassette_index_ref[0]
 
 
 cassette = _CassetteNS()
 
 
 # ── Serialization ─────────────────────────────────────────────────────────────
+
 
 def _save_cassette(record: CassetteRecord, path: str) -> None:
     p = Path(path)
@@ -91,6 +95,7 @@ def _load_cassette(path: str) -> CassetteRecord:
         )
     data = json.loads(p.read_text())
     from .._models import CassetteEntry
+
     entries = [
         CassetteEntry(
             type=e["type"],
@@ -123,5 +128,7 @@ def _entry_to_dict(entry: Any) -> dict[str, Any]:
         "node_name": entry.node_name,
         "request": entry.request,
         "response": entry.response,
-        "timestamp": entry.timestamp.isoformat() if hasattr(entry.timestamp, "isoformat") else str(entry.timestamp),
+        "timestamp": entry.timestamp.isoformat()
+        if hasattr(entry.timestamp, "isoformat")
+        else str(entry.timestamp),
     }

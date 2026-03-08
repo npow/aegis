@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
-from ._models import AgentState, RunConfig, RunResult
 from ._decorators import GraphDef
-
+from ._models import AgentState, RunConfig, RunResult
 
 # ── chain() ───────────────────────────────────────────────────────────────────
+
 
 class ChainGraph:
     """Executes a sequence of graphs, passing state from one to the next."""
@@ -24,18 +24,22 @@ class ChainGraph:
         config: RunConfig,
         **kwargs: Any,
     ) -> RunResult:
+        if not self.graphs:
+            raise ValueError("ChainGraph requires at least one graph")
         state = input
-        last_result: Optional[RunResult] = None
+        last_result: RunResult | None = None
         for i, g in enumerate(self.graphs):
             sub_config = RunConfig(
                 thread_id=f"{config.thread_id}-chain-{i}",
                 checkpointer=config.checkpointer,
+                metadata=config.metadata,
             )
             last_result = await g.run(input=state, config=sub_config, **kwargs)
             if last_result.status != "completed":
                 return last_result
             state = last_result.state
-        assert last_result is not None
+        if last_result is None:  # pragma: no cover — guarded by empty check above
+            raise RuntimeError("ChainGraph produced no result")
         return last_result
 
 
@@ -46,14 +50,15 @@ def chain(*graphs: GraphDef) -> ChainGraph:
 
 # ── parallel() ────────────────────────────────────────────────────────────────
 
+
 class ParallelGraph:
     """Fan-out: run multiple graphs concurrently with the same input."""
 
     def __init__(self, *graphs: GraphDef) -> None:
         self.graphs = list(graphs)
-        self._join_graph: Optional[GraphDef] = None
+        self._join_graph: GraphDef | None = None
 
-    def join(self, join_graph: GraphDef) -> "ParallelWithJoin":
+    def join(self, join_graph: GraphDef) -> ParallelWithJoin:
         return ParallelWithJoin(self.graphs, join_graph)
 
     async def run(
@@ -67,9 +72,18 @@ class ParallelGraph:
             sub_config = RunConfig(
                 thread_id=f"{config.thread_id}-par-{i}",
                 checkpointer=config.checkpointer,
+                metadata=config.metadata,
             )
-            tasks.append(g.run(input=input, config=sub_config, **kwargs))
-        return await asyncio.gather(*tasks)
+            tasks.append(asyncio.create_task(g.run(input=input, config=sub_config, **kwargs)))
+        try:
+            return list(await asyncio.gather(*tasks))
+        except Exception:
+            # Cancel any still-running branches to avoid orphaned tasks
+            for t in tasks:
+                t.cancel()
+            # Drain cancellations
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
 
 
 class ParallelWithJoin:
@@ -91,9 +105,16 @@ class ParallelWithJoin:
             sub_config = RunConfig(
                 thread_id=f"{config.thread_id}-par-{i}",
                 checkpointer=config.checkpointer,
+                metadata=config.metadata,
             )
-            tasks.append(g.run(input=input, config=sub_config, **kwargs))
-        results: list[RunResult] = await asyncio.gather(*tasks)
+            tasks.append(asyncio.create_task(g.run(input=input, config=sub_config, **kwargs)))
+        try:
+            results: list[RunResult] = list(await asyncio.gather(*tasks))
+        except Exception:
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
 
         # Merge results into a list annotation on the state
         # Convention: join graph receives the state from the first branch;
@@ -103,6 +124,7 @@ class ParallelWithJoin:
         join_config = RunConfig(
             thread_id=f"{config.thread_id}-join",
             checkpointer=config.checkpointer,
+            metadata=config.metadata,
         )
         return await self.join_graph.run(input=merged_state, config=join_config, **kwargs)
 
@@ -113,6 +135,7 @@ def parallel(*graphs: GraphDef) -> ParallelGraph:
 
 
 # ── supervisor() ──────────────────────────────────────────────────────────────
+
 
 class SupervisorGraph:
     """Router + specialists: the router graph decides which specialist handles each request."""
@@ -142,6 +165,7 @@ class SupervisorGraph:
             router_config = RunConfig(
                 thread_id=f"{config.thread_id}-router-{handoff}",
                 checkpointer=config.checkpointer,
+                metadata=config.metadata,
             )
             router_result = await self.router.run(input=state, config=router_config, **kwargs)
             if router_result.status != "completed":
@@ -154,9 +178,11 @@ class SupervisorGraph:
 
             specialist = self.specialists.get(specialist_key)
             if specialist is None:
-                from ._models import RunError, RunTrace
-                from datetime import datetime
                 import uuid as _uuid
+                from datetime import datetime
+
+                from ._models import RunError, RunTrace
+
                 trace = RunTrace(
                     run_id=f"run-{_uuid.uuid4().hex[:8]}",
                     thread_id=config.thread_id,
@@ -180,11 +206,38 @@ class SupervisorGraph:
             spec_config = RunConfig(
                 thread_id=f"{config.thread_id}-spec-{specialist_key}-{handoff}",
                 checkpointer=config.checkpointer,
+                metadata=config.metadata,
             )
-            spec_result = await asyncio.wait_for(
-                specialist.run(input=router_result.state, config=spec_config, **kwargs),
-                timeout=self.handoff_timeout,
-            )
+            try:
+                spec_result = await asyncio.wait_for(
+                    specialist.run(input=router_result.state, config=spec_config, **kwargs),
+                    timeout=self.handoff_timeout,
+                )
+            except asyncio.TimeoutError:
+                import uuid as _uuid
+                from datetime import datetime
+
+                from ._models import RunError, RunTrace
+
+                trace = RunTrace(
+                    run_id=f"run-{_uuid.uuid4().hex[:8]}",
+                    thread_id=config.thread_id,
+                    graph_name="supervisor",
+                    graph_version="1.0.0",
+                    started_at=datetime.utcnow(),
+                    completed_at=datetime.utcnow(),
+                    status="failed",
+                    error=f"Specialist '{specialist_key}' timed out after {self.handoff_timeout}s",
+                )
+                return RunResult(
+                    state=router_result.state,
+                    trace=trace,
+                    status="failed",
+                    error=RunError(
+                        message=f"Specialist '{specialist_key}' timed out after {self.handoff_timeout}s",
+                        exception_type="TimeoutError",
+                    ),
+                )
             state = spec_result.state
             if spec_result.status != "completed":
                 return spec_result
@@ -195,9 +248,11 @@ class SupervisorGraph:
                 return spec_result
 
         # Max handoffs reached
-        from ._models import RunError, RunTrace
-        from datetime import datetime
         import uuid as _uuid
+        from datetime import datetime
+
+        from ._models import RunError, RunTrace
+
         trace = RunTrace(
             run_id=f"run-{_uuid.uuid4().hex[:8]}",
             thread_id=config.thread_id,
@@ -237,9 +292,8 @@ def supervisor(
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _merge_parallel_results(
-    original: AgentState, results: list[RunResult]
-) -> AgentState:
+
+def _merge_parallel_results(original: AgentState, results: list[RunResult]) -> AgentState:
     """Attach parallel results to the state as _parallel_results attribute."""
     # We use a simple convention: attach the results as a dynamic attribute
     # The join graph node can access state._parallel_results

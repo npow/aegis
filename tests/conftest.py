@@ -1,6 +1,7 @@
 """Shared fixtures for Aegis tests."""
 
 import pytest
+
 from aegis.checkpointers import MemoryCheckpointer
 
 

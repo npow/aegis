@@ -1,6 +1,5 @@
 """Tests for EvalSuite, EvalCase, and assertion types."""
 
-import json
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,8 +18,8 @@ from aegis.eval import (
 )
 from aegis.testing import MockTool
 
-
 # ── Fixtures ──────────────────────────────────────────────────────────────────
+
 
 @dataclass
 class EvalState(AgentState):
@@ -36,7 +35,7 @@ async def eval_search_tool(query: str) -> list:
 
 @node()
 async def eval_research_node(state: EvalState, tools) -> EvalState:
-    results = await tools.eval_search_tool(query=state.query)
+    await tools.eval_search_tool(query=state.query)
     return state.update(status="searched")
 
 
@@ -57,10 +56,12 @@ async def eval_pipeline(state: EvalState) -> EvalState:
 
 # ── Assertion unit tests ──────────────────────────────────────────────────────
 
+
 def test_tool_call_assertion_passes_when_called():
-    from aegis.eval._assertions import evaluate_assertion
-    from aegis._models import RunTrace, NodeTrace, ToolCall
     from datetime import datetime
+
+    from aegis._models import NodeTrace, RunTrace, ToolCall
+    from aegis.eval._assertions import evaluate_assertion
 
     tool_call = ToolCall(
         call_id="c1",
@@ -103,9 +104,10 @@ def test_tool_call_assertion_passes_when_called():
 
 
 def test_tool_call_assertion_fails_when_not_called():
-    from aegis.eval._assertions import evaluate_assertion
-    from aegis._models import RunTrace
     from datetime import datetime
+
+    from aegis._models import RunTrace
+    from aegis.eval._assertions import evaluate_assertion
 
     trace = RunTrace(
         run_id="r1",
@@ -129,9 +131,10 @@ def test_tool_call_assertion_fails_when_not_called():
 
 
 def test_schema_assertion_passes():
-    from aegis.eval._assertions import evaluate_assertion
-    from aegis._models import RunTrace
     from datetime import datetime
+
+    from aegis._models import RunTrace
+    from aegis.eval._assertions import evaluate_assertion
 
     trace = RunTrace(
         run_id="r1",
@@ -152,9 +155,10 @@ def test_schema_assertion_passes():
 
 
 def test_schema_assertion_fails():
-    from aegis.eval._assertions import evaluate_assertion
-    from aegis._models import RunTrace
     from datetime import datetime
+
+    from aegis._models import RunTrace
+    from aegis.eval._assertions import evaluate_assertion
 
     trace = RunTrace(
         run_id="r1",
@@ -175,9 +179,10 @@ def test_schema_assertion_fails():
 
 
 def test_tool_call_assertion_max_times():
-    from aegis.eval._assertions import evaluate_assertion
-    from aegis._models import RunTrace, NodeTrace, ToolCall
     from datetime import datetime
+
+    from aegis._models import NodeTrace, RunTrace, ToolCall
+    from aegis.eval._assertions import evaluate_assertion
 
     def make_tc(i):
         return ToolCall(
@@ -201,9 +206,14 @@ def test_tool_call_assertion_max_times():
         status="completed",
     )
     trace = RunTrace(
-        run_id="r1", thread_id="t1", graph_name="g", graph_version="1.0",
-        started_at=datetime.utcnow(), completed_at=datetime.utcnow(),
-        status="completed", nodes_executed=[node_trace],
+        run_id="r1",
+        thread_id="t1",
+        graph_name="g",
+        graph_version="1.0",
+        started_at=datetime.utcnow(),
+        completed_at=datetime.utcnow(),
+        status="completed",
+        nodes_executed=[node_trace],
     )
     assertion = ToolCallAssertion(
         description="max 3 calls",
@@ -219,6 +229,7 @@ def test_tool_call_assertion_max_times():
 
 # ── EvalSuite integration tests ───────────────────────────────────────────────
 
+
 async def test_eval_suite_passes_when_all_cases_pass():
     cp = MemoryCheckpointer()
 
@@ -227,10 +238,13 @@ async def test_eval_suite_passes_when_all_cases_pass():
 
         # We'll use a mock-based cassette approach: record with mocks
         from aegis.testing import cassette as _cassette
+
         async with _cassette.record(path):
-            async with eval_pipeline.mock_tools({
-                "eval_search_tool": MockTool.returns(["r1"]),
-            }):
+            async with eval_pipeline.mock_tools(
+                {
+                    "eval_search_tool": MockTool.returns(["r1"]),
+                }
+            ):
                 await eval_pipeline.run(
                     input=EvalState(query="quantum"),
                     config=RunConfig(thread_id="eval-record", checkpointer=cp),
@@ -261,7 +275,6 @@ async def test_eval_suite_passes_when_all_cases_pass():
             pass_rate_gate=1.0,
         )
 
-        cp2 = MemoryCheckpointer()
         results = await suite.run(base_thread_id="eval-run")
         assert results.pass_rate == 1.0
         assert results.gate_passed is True
@@ -275,10 +288,13 @@ async def test_eval_suite_fails_gate_when_case_fails():
         path = f"{tmpdir}/eval_fail.json"
 
         from aegis.testing import cassette as _cassette
+
         async with _cassette.record(path):
-            async with eval_pipeline.mock_tools({
-                "eval_search_tool": MockTool.returns([]),
-            }):
+            async with eval_pipeline.mock_tools(
+                {
+                    "eval_search_tool": MockTool.returns([]),
+                }
+            ):
                 await eval_pipeline.run(
                     input=EvalState(query="test"),
                     config=RunConfig(thread_id="eval-fail-record", checkpointer=cp),
@@ -318,10 +334,13 @@ async def test_eval_suite_summary_contains_case_results():
         path = f"{tmpdir}/summary.json"
 
         from aegis.testing import cassette as _cassette
+
         async with _cassette.record(path):
-            async with eval_pipeline.mock_tools({
-                "eval_search_tool": MockTool.returns([]),
-            }):
+            async with eval_pipeline.mock_tools(
+                {
+                    "eval_search_tool": MockTool.returns([]),
+                }
+            ):
                 await eval_pipeline.run(
                     input=EvalState(query="test"),
                     config=RunConfig(thread_id="summary-record", checkpointer=cp),
@@ -351,9 +370,10 @@ async def test_eval_suite_summary_contains_case_results():
 async def test_trace_snapshot_assertion_creates_golden_on_first_run():
     """First run creates the golden file and passes."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        from aegis.eval._assertions import evaluate_assertion
-        from aegis._models import RunTrace, NodeTrace, ToolCall
         from datetime import datetime
+
+        from aegis._models import NodeTrace, RunTrace, ToolCall
+        from aegis.eval._assertions import evaluate_assertion
 
         golden_path = f"{tmpdir}/golden.json"
 
@@ -377,9 +397,14 @@ async def test_trace_snapshot_assertion_creates_golden_on_first_run():
             status="completed",
         )
         trace = RunTrace(
-            run_id="r1", thread_id="t1", graph_name="g", graph_version="1.0",
-            started_at=datetime.utcnow(), completed_at=datetime.utcnow(),
-            status="completed", nodes_executed=[node_trace],
+            run_id="r1",
+            thread_id="t1",
+            graph_name="g",
+            graph_version="1.0",
+            started_at=datetime.utcnow(),
+            completed_at=datetime.utcnow(),
+            status="completed",
+            nodes_executed=[node_trace],
         )
         assertion = TraceSnapshotAssertion(
             description="trace regression test",

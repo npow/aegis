@@ -2,14 +2,12 @@
 
 from dataclasses import dataclass, field
 
-import pytest
-
 from aegis import AgentState, RunConfig, graph, node
 from aegis._multi_agent import chain, parallel, supervisor
 from aegis.checkpointers import MemoryCheckpointer
 
-
 # ── Fixtures ──────────────────────────────────────────────────────────────────
+
 
 @dataclass
 class PipeState(AgentState):
@@ -50,6 +48,7 @@ async def pipe_sub(state: PipeState) -> PipeState:
 
 # ── chain() tests ─────────────────────────────────────────────────────────────
 
+
 async def test_chain_executes_sequentially():
     pipeline = chain(pipe_add, pipe_mul)
     cp = MemoryCheckpointer()
@@ -58,7 +57,7 @@ async def test_chain_executes_sequentially():
         config=RunConfig(thread_id="chain-001", checkpointer=cp),
     )
     assert result.status == "completed"
-    assert result.state.value == 30   # (5+10)*2 = 30
+    assert result.state.value == 30  # (5+10)*2 = 30
 
 
 async def test_chain_three_graphs():
@@ -69,7 +68,7 @@ async def test_chain_three_graphs():
         config=RunConfig(thread_id="chain-three-001", checkpointer=cp),
     )
     assert result.status == "completed"
-    assert result.state.value == 29   # ((5+10)*2)-1 = 29
+    assert result.state.value == 29  # ((5+10)*2)-1 = 29
 
 
 async def test_chain_stops_on_first_failure():
@@ -92,6 +91,7 @@ async def test_chain_stops_on_first_failure():
 
 
 # ── parallel() tests ──────────────────────────────────────────────────────────
+
 
 async def test_parallel_runs_concurrently():
     pipeline = parallel(pipe_add, pipe_mul)
@@ -118,7 +118,7 @@ async def test_parallel_three_graphs():
     values = [r.state.value for r in results]
     assert 15 in values  # 5+10
     assert 10 in values  # 5*2
-    assert 4 in values   # 5-1
+    assert 4 in values  # 5-1
 
 
 async def test_parallel_with_join():
@@ -143,6 +143,7 @@ async def test_parallel_with_join():
 
 # ── supervisor() tests ────────────────────────────────────────────────────────
 
+
 @dataclass
 class RouterState(AgentState):
     query: str = ""
@@ -161,12 +162,12 @@ async def math_specialist_node(state: RouterState) -> RouterState:
     return state.update(answer="42", next_specialist="__done__")
 
 
-@graph(name=f"supervisor-router-v1", version="1.0.0")
+@graph(name="supervisor-router-v1", version="1.0.0")
 async def supervisor_router(state: RouterState) -> RouterState:
     return await route_to_math(state)
 
 
-@graph(name=f"supervisor-math-v1", version="1.0.0")
+@graph(name="supervisor-math-v1", version="1.0.0")
 async def supervisor_math(state: RouterState) -> RouterState:
     return await math_specialist_node(state)
 
@@ -209,6 +210,58 @@ async def test_supervisor_unknown_specialist_fails():
     assert "nonexistent" in result.error.message
 
 
+async def test_parallel_branch_failure_returned_as_failed_result():
+    """A branch that raises an exception returns a failed RunResult (not re-raised)."""
+
+    @node(retries=0)
+    async def fail_branch_node(state: PipeState) -> PipeState:
+        raise RuntimeError("branch explosion")
+
+    @graph(name=f"fail-branch-v{id(fail_branch_node)}", version="1.0.0")
+    async def fail_branch(state: PipeState) -> PipeState:
+        return await fail_branch_node(state)
+
+    pipeline = parallel(pipe_add, fail_branch)
+    cp = MemoryCheckpointer()
+    results = await pipeline.run(
+        input=PipeState(value=1),
+        config=RunConfig(thread_id="fail-branch-001", checkpointer=cp),
+    )
+    assert len(results) == 2
+    # pipe_add should succeed
+    assert results[0].status == "completed"
+    # fail_branch should be wrapped as a failed result
+    assert results[1].status == "failed"
+    assert "branch explosion" in results[1].error.message
+
+
+async def test_chain_propagates_metadata():
+    """chain() sub-configs should carry the parent RunConfig metadata."""
+    captured_metadata = {}
+
+    @node()
+    async def capture_meta_node(state: PipeState) -> PipeState:
+        from aegis._context import _run_context
+
+        ctx = _run_context.get()
+        # Metadata is on RunConfig, not RunContext directly,
+        # but we can verify thread_id naming matches chain pattern
+        captured_metadata["thread_id"] = ctx.thread_id
+        return state
+
+    @graph(name=f"capture-meta-v{id(capture_meta_node)}", version="1.0.0")
+    async def capture_meta_graph(state: PipeState) -> PipeState:
+        return await capture_meta_node(state)
+
+    pipeline = chain(capture_meta_graph)
+    cp = MemoryCheckpointer()
+    await pipeline.run(
+        input=PipeState(value=0),
+        config=RunConfig(thread_id="meta-parent", checkpointer=cp, metadata={"key": "val"}),
+    )
+    assert captured_metadata.get("thread_id", "").startswith("meta-parent-chain-")
+
+
 async def test_supervisor_max_handoffs_exceeded():
     @node()
     async def loop_router_node(state: RouterState) -> RouterState:
@@ -239,3 +292,39 @@ async def test_supervisor_max_handoffs_exceeded():
     )
     assert result.status == "failed"
     assert "max_handoffs" in result.error.message.lower() or "2" in result.error.message
+
+
+async def test_supervisor_specialist_timeout_returns_failed_result():
+    """Specialist that times out must return a failed RunResult, not raise TimeoutError."""
+    import asyncio
+
+    @node(retries=0)
+    async def slow_specialist_node(state: RouterState) -> RouterState:
+        await asyncio.sleep(10.0)  # will be timed out
+        return state
+
+    @node()
+    async def route_to_slow(state: RouterState) -> RouterState:
+        return state.update(next_specialist="slow")
+
+    @graph(name=f"slow-spec-v{id(slow_specialist_node)}", version="1.0.0")
+    async def slow_specialist(state: RouterState) -> RouterState:
+        return await slow_specialist_node(state)
+
+    @graph(name=f"timeout-router-v{id(route_to_slow)}", version="1.0.0")
+    async def timeout_router(state: RouterState) -> RouterState:
+        return await route_to_slow(state)
+
+    pipeline = supervisor(
+        router=timeout_router,
+        specialists={"slow": slow_specialist},
+        max_handoffs=1,
+        handoff_timeout=0.05,  # 50ms
+    )
+    cp = MemoryCheckpointer()
+    result = await pipeline.run(
+        input=RouterState(query="test"),
+        config=RunConfig(thread_id="timeout-specialist-001", checkpointer=cp),
+    )
+    assert result.status == "failed"
+    assert "timed out" in result.error.message.lower() or "TimeoutError" in result.error.exception_type

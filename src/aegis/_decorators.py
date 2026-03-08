@@ -2,41 +2,38 @@
 
 from __future__ import annotations
 
-import asyncio
 import inspect
-import time
 import uuid
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Callable, Optional, TypeVar
+from typing import Any, TypeVar
 
 from ._models import (
     AgentState,
     Budget,
-    BudgetExceededError,
     PermissionScope,
     RunConfig,
     RunResult,
-    RunTrace,
 )
 
 F = TypeVar("F", bound=Callable[..., Any])
 
 # ── Global registries ─────────────────────────────────────────────────────────
 
-_TOOL_REGISTRY: dict[str, "ToolDef"] = {}
-_GRAPH_REGISTRY: dict[str, "GraphDef"] = {}
+_TOOL_REGISTRY: dict[str, ToolDef] = {}
+_GRAPH_REGISTRY: dict[str, GraphDef] = {}
 
 
-def get_tool_registry() -> dict[str, "ToolDef"]:
+def get_tool_registry() -> dict[str, ToolDef]:
     return dict(_TOOL_REGISTRY)
 
 
-def get_graph_registry() -> dict[str, "GraphDef"]:
+def get_graph_registry() -> dict[str, GraphDef]:
     return dict(_GRAPH_REGISTRY)
 
 
 # ── ToolDef ───────────────────────────────────────────────────────────────────
+
 
 class ToolDef:
     """Descriptor wrapping a @tool-decorated function."""
@@ -47,7 +44,7 @@ class ToolDef:
         *,
         name: str,
         description: str = "",
-        permissions: Optional[Any] = None,   # ToolPermission
+        permissions: Any | None = None,  # ToolPermission
         require_human_approval: bool = False,
         approval_timeout_seconds: int = 3600,
         approval_on_timeout: str = "hard_stop",
@@ -68,6 +65,7 @@ class ToolDef:
 
 # ── NodeDef ───────────────────────────────────────────────────────────────────
 
+
 class NodeDef:
     """Descriptor wrapping a @node-decorated function."""
 
@@ -77,10 +75,16 @@ class NodeDef:
         *,
         retries: int = 0,
         retry_backoff: str = "none",
-        retry_on: Optional[tuple[type, ...]] = None,
-        timeout_seconds: Optional[float] = None,
+        retry_on: tuple[type, ...] | None = None,
+        timeout_seconds: float | None = None,
         sandbox: bool = False,
     ) -> None:
+        if retry_on is not None:
+            bad = [
+                t for t in retry_on if not (isinstance(t, type) and issubclass(t, BaseException))
+            ]
+            if bad:
+                raise TypeError(f"@node retry_on must contain only exception classes, got: {bad!r}")
         self.fn = fn
         self.name = fn.__name__
         self.retries = retries
@@ -100,6 +104,7 @@ class NodeDef:
 
     async def __call__(self, state: AgentState, **kwargs: Any) -> AgentState:
         from ._context import _run_context
+
         ctx = _run_context.get()
         if ctx is None:
             # Standalone — inject whatever was provided, execute directly
@@ -107,16 +112,18 @@ class NodeDef:
         else:
             # Inside a graph run — full framework machinery
             from ._runtime import _execute_node_in_context
+
             return await _execute_node_in_context(self, state, ctx)
 
     async def _call_direct(self, state: AgentState, **kwargs: Any) -> AgentState:
         """Execute without framework machinery (for standalone / direct tests)."""
         call_kwargs: dict[str, Any] = dict(kwargs)
-        result = await self.fn(state, **call_kwargs)
+        result: AgentState = await self.fn(state, **call_kwargs)
         return result
 
 
 # ── GraphDef ──────────────────────────────────────────────────────────────────
+
 
 class GraphDef:
     """Descriptor wrapping a @graph-decorated function.
@@ -131,8 +138,8 @@ class GraphDef:
         name: str,
         version: str = "1.0.0",
         checkpointer: str = "memory",
-        permissions: Optional[PermissionScope] = None,
-        budget: Optional[Budget] = None,
+        permissions: PermissionScope | None = None,
+        budget: Budget | None = None,
     ) -> None:
         self.fn = fn
         self.name = name
@@ -142,7 +149,7 @@ class GraphDef:
         self.default_budget = budget
         self.__name__ = fn.__name__
         self.__doc__ = fn.__doc__
-        self._budget_exceeded_handler: Optional[Callable[..., Any]] = None
+        self._budget_exceeded_handler: Callable[..., Any] | None = None
         # Register in global registry
         _GRAPH_REGISTRY[name] = self
 
@@ -152,9 +159,10 @@ class GraphDef:
         self,
         input: AgentState,
         config: RunConfig,
-        budget: Optional[Budget] = None,
+        budget: Budget | None = None,
     ) -> RunResult:
         from ._runtime import _run_graph
+
         return await _run_graph(
             self,
             input_state=input,
@@ -162,9 +170,10 @@ class GraphDef:
             budget=budget or self.default_budget,
         )
 
-    async def resume(self, thread_id: str, config: Optional[RunConfig] = None) -> RunResult:
+    async def resume(self, thread_id: str, config: RunConfig | None = None) -> RunResult:
         """Resume from the last committed checkpoint for this thread."""
         from ._runtime import _resume_graph
+
         if config is None:
             config = RunConfig(thread_id=thread_id)
         return await _resume_graph(self, thread_id=thread_id, config=config)
@@ -173,41 +182,53 @@ class GraphDef:
         self,
         thread_id: str,
         checkpoint_id: str,
-        inject_state: Optional[dict[str, Any]] = None,
-        new_thread_id: Optional[str] = None,
+        inject_state: dict[str, Any] | None = None,
+        new_thread_id: str | None = None,
+        config: RunConfig | None = None,
     ) -> RunResult:
-        """Fork from a specific checkpoint, optionally injecting state changes."""
+        """Fork from a specific checkpoint, optionally injecting state changes.
+
+        Pass ``config`` to specify which checkpointer holds the original thread's
+        history (required when you ran the graph with a custom ``config.checkpointer``).
+        """
         from ._runtime import _fork_graph
+
         return await _fork_graph(
             self,
             thread_id=thread_id,
             checkpoint_id=checkpoint_id,
             inject_state=inject_state or {},
             new_thread_id=new_thread_id or f"{thread_id}-fork-{uuid.uuid4().hex[:6]}",
+            config=config,
         )
 
-    async def get_checkpoint_history(self, thread_id: str) -> list[Any]:
-        """Return all checkpoints for a thread, ordered by step."""
-        checkpointer = self._resolve_checkpointer(None)
-        return await checkpointer.get_history(thread_id, self.name)
+    async def get_checkpoint_history(
+        self, thread_id: str, config: RunConfig | None = None
+    ) -> list[Any]:
+        """Return all checkpoints for a thread, ordered by step.
+
+        Pass ``config`` to specify which checkpointer to read from when you used
+        a custom ``config.checkpointer`` during the original run.
+        """
+        checkpointer = self._resolve_checkpointer(config)
+        return await checkpointer.get_history(thread_id, self.name)  # type: ignore[no-any-return]
 
     async def stream(
         self,
         input: AgentState,
         config: RunConfig,
-        budget: Optional[Budget] = None,
+        budget: Budget | None = None,
     ) -> AsyncIterator[Any]:
         """Stream intermediate node events during execution."""
         from ._runtime import _stream_graph
+
         async for event in _stream_graph(self, input_state=input, config=config, budget=budget):
             yield event
 
     # ── Testing helpers ───────────────────────────────────────────────────────
 
     @asynccontextmanager
-    async def mock_tools(
-        self, overrides: dict[str, Any]
-    ) -> AsyncIterator["MockToolsContext"]:
+    async def mock_tools(self, overrides: dict[str, Any]) -> AsyncIterator[MockToolsContext]:
         """Context manager: replace named tools with MockTool instances for this block."""
         ctx = MockToolsContext(overrides)
         async with ctx:
@@ -215,29 +236,35 @@ class GraphDef:
 
     # ── Budget exceeded handler ───────────────────────────────────────────────
 
-    def on_budget_exceeded(
-        self, handler: Callable[..., Any]
-    ) -> Callable[..., Any]:
+    def on_budget_exceeded(self, handler: Callable[..., Any]) -> Callable[..., Any]:
         """Decorator: register a handler called when the budget is exceeded."""
         self._budget_exceeded_handler = handler
         return handler
 
     # ── Permissions display ───────────────────────────────────────────────────
 
-    def get_permissions(self) -> Optional[PermissionScope]:
+    def get_permissions(self) -> PermissionScope | None:
         return self.permissions
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
-    def _resolve_checkpointer(
-        self, config: Optional[RunConfig]
-    ) -> Any:  # CheckpointerBase
-        """Return the checkpointer to use, preferring config override."""
+    def _resolve_checkpointer(self, config: RunConfig | None) -> Any:  # CheckpointerBase
+        """Return the checkpointer to use, in priority order:
+        1. config.checkpointer (per-run override)
+        2. aegis.configure(checkpointer=...) global default
+        3. graph-level default (memory or sqlite based on @graph(checkpointer=...))
+        """
         from .checkpointers._memory import MemoryCheckpointer
         from .checkpointers._sqlite import SqliteCheckpointer
 
         if config is not None and config.checkpointer is not None:
             return config.checkpointer
+
+        # Check global default set via aegis.configure()
+        from . import _globals
+
+        if _globals.DEFAULT_CHECKPOINTER is not None:
+            return _globals.DEFAULT_CHECKPOINTER
 
         if self._checkpointer_type == "memory":
             # Use a shared in-process store keyed by graph name
@@ -251,6 +278,7 @@ class GraphDef:
         else:
             # postgres / redis / dynamodb — default to memory with a warning
             import warnings
+
             warnings.warn(
                 f"Checkpointer type '{self._checkpointer_type}' not configured; "
                 "falling back to in-memory. Set config.checkpointer explicitly.",
@@ -263,17 +291,20 @@ class GraphDef:
 
 # ── @graph decorator ──────────────────────────────────────────────────────────
 
+
 def graph(
     name: str,
     *,
     version: str = "1.0.0",
     checkpointer: str = "memory",
-    permissions: Optional[PermissionScope] = None,
-    budget: Optional[Budget] = None,
+    permissions: PermissionScope | None = None,
+    budget: Budget | None = None,
 ) -> Callable[[F], GraphDef]:
     """Decorator that turns an async function into an Aegis graph."""
 
     def decorator(fn: F) -> GraphDef:
+        if not inspect.iscoroutinefunction(fn):
+            raise TypeError(f"@graph: '{fn.__name__}' must be an async function (use 'async def')")
         return GraphDef(
             fn,
             name=name,
@@ -288,18 +319,21 @@ def graph(
 
 # ── @node decorator ───────────────────────────────────────────────────────────
 
+
 def node(
-    _fn: Optional[Callable[..., Any]] = None,
+    _fn: Callable[..., Any] | None = None,
     *,
     retries: int = 0,
     retry_backoff: str = "none",
-    retry_on: Optional[tuple[type, ...]] = None,
-    timeout_seconds: Optional[float] = None,
+    retry_on: tuple[type, ...] | None = None,
+    timeout_seconds: float | None = None,
     sandbox: bool = False,
 ) -> Any:
     """Decorator that wraps an async node function with Aegis execution machinery."""
 
     def decorator(fn: Callable[..., Any]) -> NodeDef:
+        if not inspect.iscoroutinefunction(fn):
+            raise TypeError(f"@node: '{fn.__name__}' must be an async function (use 'async def')")
         return NodeDef(
             fn,
             retries=retries,
@@ -317,12 +351,13 @@ def node(
 
 # ── @tool decorator ───────────────────────────────────────────────────────────
 
+
 def tool(
-    _fn: Optional[Callable[..., Any]] = None,
+    _fn: Callable[..., Any] | None = None,
     *,
-    name: Optional[str] = None,
+    name: str | None = None,
     description: str = "",
-    permissions: Optional[Any] = None,
+    permissions: Any | None = None,
     require_human_approval: bool = False,
     approval_timeout_seconds: int = 3600,
     approval_on_timeout: str = "hard_stop",
@@ -350,6 +385,7 @@ def tool(
 
 # ── MockToolsContext (used by GraphDef.mock_tools()) ─────────────────────────
 
+
 class MockToolsContext:
     """Async context manager returned by graph.mock_tools()."""
 
@@ -358,12 +394,14 @@ class MockToolsContext:
         self._mock_ctx_var_token: Any = None
         self.calls: dict[str, Any] = {}  # populated during run
 
-    async def __aenter__(self) -> "MockToolsContext":
+    async def __aenter__(self) -> MockToolsContext:
         from .testing._mock_tools import _mock_testing_context, _TestingState
+
         # Merge with existing state (e.g., preserve cassette context)
         existing = _mock_testing_context.get()
         if existing is not None:
             import dataclasses
+
             state = dataclasses.replace(
                 existing,
                 mock_tools={**(existing.mock_tools or {}), **self._overrides},
@@ -376,5 +414,6 @@ class MockToolsContext:
 
     async def __aexit__(self, *args: Any) -> None:
         from .testing._mock_tools import _mock_testing_context
+
         if self._mock_ctx_var_token is not None:
             _mock_testing_context.reset(self._mock_ctx_var_token)

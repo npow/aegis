@@ -1,22 +1,18 @@
 """Tests for Aegis data models."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
-
-import pytest
 
 from aegis import (
     AgentState,
     Budget,
     BudgetDecision,
     BudgetStatus,
-    Checkpoint,
     PermissionScope,
-    NetworkPermission,
 )
 
-
 # ── AgentState ────────────────────────────────────────────────────────────────
+
 
 @dataclass
 class _Counter(AgentState):
@@ -29,7 +25,7 @@ def test_agent_state_update_creates_new_instance():
     updated = original.update(value=10)
     assert updated.value == 10
     assert updated.label == "hello"
-    assert original.value == 5   # unchanged
+    assert original.value == 5  # unchanged
 
 
 def test_agent_state_update_does_not_mutate():
@@ -65,6 +61,7 @@ def test_agent_state_from_dict_ignores_unknown_fields():
 
 # ── Budget ────────────────────────────────────────────────────────────────────
 
+
 def test_budget_decision_hard_stop():
     decision = BudgetDecision.hard_stop()
     assert decision.action == "hard_stop"
@@ -72,10 +69,14 @@ def test_budget_decision_hard_stop():
 
 
 def test_budget_decision_extend():
-    decision = BudgetDecision.extend(max_llm_cost_usd=5.00)
+    base = Budget(max_tokens=1000, max_llm_cost_usd=2.00)
+    decision = BudgetDecision.extend(base, max_llm_cost_usd=5.00)
     assert decision.action == "extend"
     assert decision.updated_budget is not None
+    # The override is applied
     assert decision.updated_budget.max_llm_cost_usd == 5.00
+    # Other fields from the base budget are preserved
+    assert decision.updated_budget.max_tokens == 1000
 
 
 def test_budget_decision_downgrade():
@@ -95,15 +96,15 @@ def test_budget_status_pct_consumed():
 
 # ── Checkpoint ID format ──────────────────────────────────────────────────────
 
+
 def test_checkpoint_id_format():
-    from aegis._runtime import _make_checkpoint
-    from aegis._context import RunContext, LLMResponse
-    from aegis._models import RunTrace, RunConfig
-    from aegis.checkpointers import MemoryCheckpointer
 
     # Just verify the format by constructing a valid checkpoint id manually
     state = _Counter(value=1)
-    import hashlib, json, dataclasses
+    import dataclasses
+    import hashlib
+    import json
+
     state_dict = dataclasses.asdict(state)
     state_hash = hashlib.sha256(
         json.dumps(state_dict, sort_keys=True, default=str).encode()
@@ -116,15 +117,17 @@ def test_checkpoint_id_format():
 
 # ── PermissionScope ───────────────────────────────────────────────────────────
 
+
 def test_permission_scope_defaults():
     scope = PermissionScope()
-    assert scope.tools is None           # None = all tools allowed
+    assert scope.tools is None  # None = all tools allowed
     assert scope.network.deny_all_others is True
     assert scope.filesystem.read is False
 
 
 def test_network_permission_domain_matching():
     from aegis._permissions import _domain_matches_any
+
     patterns = ["*.wikipedia.org", "arxiv.org"]
     assert _domain_matches_any("en.wikipedia.org", patterns) is True
     assert _domain_matches_any("arxiv.org", patterns) is True
@@ -134,10 +137,10 @@ def test_network_permission_domain_matching():
 
 # ── EvalSuiteResult ───────────────────────────────────────────────────────────
 
+
 def test_eval_suite_result_summary():
-    from aegis import EvalSuiteResult, EvalCaseResult
+    from aegis import EvalCaseResult, EvalSuiteResult
     from aegis._models import RunTrace
-    from datetime import datetime
 
     trace = RunTrace(
         run_id="r1",

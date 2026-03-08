@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
 from pathlib import Path
-from typing import Optional
 
 import click
 
@@ -21,7 +19,6 @@ def main() -> None:
 @click.argument("project_name")
 def init(project_name: str) -> None:
     """Initialize a new Aegis project."""
-    from pathlib import Path
 
     root = Path(project_name)
     if root.exists():
@@ -39,7 +36,7 @@ def init(project_name: str) -> None:
     )
     (root / "src" / project_name / "__init__.py").write_text("")
     (root / "src" / project_name / "agent.py").write_text(
-        f'"""Example Aegis agent."""\n\nfrom dataclasses import dataclass\nfrom aegis import AgentState, graph, node\n\n\n@dataclass\nclass MyState(AgentState):\n    query: str = ""\n    result: str = ""\n\n\n@node()\nasync def process_node(state: MyState) -> MyState:\n    return state.update(result=f"Processed: {{state.query}}")\n\n\n@graph(name="my-agent", version="1.0.0")\nasync def my_agent(state: MyState) -> MyState:\n    return await process_node(state)\n'
+        '"""Example Aegis agent."""\n\nfrom dataclasses import dataclass\nfrom aegis import AgentState, graph, node\n\n\n@dataclass\nclass MyState(AgentState):\n    query: str = ""\n    result: str = ""\n\n\n@node()\nasync def process_node(state: MyState) -> MyState:\n    return state.update(result=f"Processed: {state.query}")\n\n\n@graph(name="my-agent", version="1.0.0")\nasync def my_agent(state: MyState) -> MyState:\n    return await process_node(state)\n'
     )
     (root / "tests" / "test_agent.py").write_text(
         f'"""Tests for my_agent."""\n\nimport pytest\nfrom {project_name}.agent import MyState, my_agent\nfrom aegis import RunConfig\nfrom aegis.checkpointers import MemoryCheckpointer\n\n\nasync def test_my_agent():\n    result = await my_agent.run(\n        input=MyState(query="hello"),\n        config=RunConfig(thread_id="test-001", checkpointer=MemoryCheckpointer()),\n    )\n    assert result.status == "completed"\n    assert result.state.result == "Processed: hello"\n'
@@ -54,9 +51,10 @@ def init(project_name: str) -> None:
 @click.option("--input", "input_json", required=True, help="JSON input state")
 @click.option("--thread-id", default=None, help="Thread ID (auto-generated if omitted)")
 @click.option("--checkpointer", default="sqlite", show_default=True)
-def run(graph_name: str, input_json: str, thread_id: Optional[str], checkpointer: str) -> None:
+def run(graph_name: str, input_json: str, thread_id: str | None, checkpointer: str) -> None:
     """Run a graph with the given input."""
     import uuid as _uuid
+
     from aegis._decorators import _GRAPH_REGISTRY
 
     _thread_id = thread_id or f"cli-{_uuid.uuid4().hex[:8]}"
@@ -70,10 +68,10 @@ def run(graph_name: str, input_json: str, thread_id: Optional[str], checkpointer
         input_data = json.loads(input_json)
     except json.JSONDecodeError as exc:
         click.echo(f"Invalid JSON input: {exc}", err=True)
-        raise SystemExit(1)
+        raise SystemExit(1) from None
 
     from aegis._models import RunConfig
-    from aegis._runtime import _infer_state_type, _deserialize_state
+    from aegis._runtime import _deserialize_state, _infer_state_type
     from aegis.checkpointers import MemoryCheckpointer, SqliteCheckpointer
 
     state_type = _infer_state_type(graph_def)
@@ -83,14 +81,19 @@ def run(graph_name: str, input_json: str, thread_id: Optional[str], checkpointer
 
     result = asyncio.run(graph_def.run(input=input_state, config=config))
 
-    click.echo(json.dumps({
-        "status": result.status,
-        "thread_id": _thread_id,
-        "run_id": result.run_id,
-        "state": result.trace.final_state,
-        "cost_usd": result.trace.total_cost_usd,
-        "wall_time_seconds": result.trace.wall_time_seconds,
-    }, indent=2))
+    click.echo(
+        json.dumps(
+            {
+                "status": result.status,
+                "thread_id": _thread_id,
+                "run_id": result.run_id,
+                "state": result.trace.final_state,
+                "cost_usd": result.trace.total_cost_usd,
+                "wall_time_seconds": result.trace.wall_time_seconds,
+            },
+            indent=2,
+        )
+    )
 
 
 @main.command()
@@ -111,11 +114,16 @@ def resume(graph_name: str, thread_id: str) -> None:
     config = RunConfig(thread_id=thread_id, checkpointer=cp)
     result = asyncio.run(graph_def.resume(thread_id=thread_id, config=config))
 
-    click.echo(json.dumps({
-        "status": result.status,
-        "thread_id": thread_id,
-        "run_id": result.run_id,
-    }, indent=2))
+    click.echo(
+        json.dumps(
+            {
+                "status": result.status,
+                "thread_id": thread_id,
+                "run_id": result.run_id,
+            },
+            indent=2,
+        )
+    )
 
 
 @main.command()
@@ -156,7 +164,9 @@ def run_eval(graph_name: str, suite: str) -> None:
         click.echo(f"Cannot load eval suite from '{suite}'", err=True)
         raise SystemExit(1)
     mod = importlib.util.module_from_spec(spec_obj)
-    assert spec_obj.loader is not None
+    if spec_obj.loader is None:
+        click.echo(f"Cannot execute eval suite '{suite}': no loader found", err=True)
+        raise SystemExit(1)
     spec_obj.loader.exec_module(mod)  # type: ignore[union-attr]
 
     # Find a variable named 'suite' in the module
@@ -174,7 +184,7 @@ def run_eval(graph_name: str, suite: str) -> None:
         results.assert_gates()
     except EvalGateFailure as exc:
         click.echo(f"\n✗ Eval gate FAILED: {exc}", err=True)
-        raise SystemExit(1)
+        raise SystemExit(1) from None
 
     click.echo(f"\n✓ Eval gate passed ({results.pass_rate:.0%})")
 
@@ -218,7 +228,9 @@ def permissions(graph_name: str) -> None:
 
     scope = graph_def.permissions
     if scope is None:
-        click.echo(f"Graph '{graph_name}' has no permission scope declared (all tools and network allowed).")
+        click.echo(
+            f"Graph '{graph_name}' has no permission scope declared (all tools and network allowed)."
+        )
         return
 
     click.echo(f"Permission scope for '{graph_name}':")
@@ -228,7 +240,9 @@ def permissions(graph_name: str) -> None:
         click.echo("  Tools:   (all registered tools)")
     if scope.network:
         net = scope.network
-        click.echo(f"  Network: allowed_domains={net.allowed_domains}, deny_all_others={net.deny_all_others}")
+        click.echo(
+            f"  Network: allowed_domains={net.allowed_domains}, deny_all_others={net.deny_all_others}"
+        )
     if scope.filesystem:
         fs = scope.filesystem
         click.echo(f"  Files:   read={fs.read}, write={fs.write}")
@@ -243,12 +257,13 @@ def permissions(graph_name: str) -> None:
 @click.option("--input", "input_json", required=True, help="JSON input state")
 @click.option("--cassette", required=True, help="Path to save the cassette file")
 @click.option("--thread-id", default=None)
-def record(graph_name: str, input_json: str, cassette: str, thread_id: Optional[str]) -> None:
+def record(graph_name: str, input_json: str, cassette: str, thread_id: str | None) -> None:
     """Record a cassette from a live graph run."""
     import uuid as _uuid
+
     from aegis._decorators import _GRAPH_REGISTRY
     from aegis._models import RunConfig
-    from aegis._runtime import _infer_state_type, _deserialize_state
+    from aegis._runtime import _deserialize_state, _infer_state_type
     from aegis.checkpointers import MemoryCheckpointer
     from aegis.testing import cassette as _cassette
 

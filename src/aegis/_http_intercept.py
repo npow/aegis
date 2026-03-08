@@ -8,7 +8,7 @@ Layer 2 (proxy injection) and Layer 3 (sandbox) are stubs in this release.
 from __future__ import annotations
 
 import threading
-from typing import Any, Optional
+from typing import Any
 
 _installed = False
 _lock = threading.Lock()
@@ -117,9 +117,11 @@ def _intercept(url: str) -> None:
             thread_id=ctx.thread_id,
             node_name=ctx.current_node_name or "unknown",
         )
-    except Exception:
+    except Exception as _exc:
         from datetime import datetime
+
         from ._models import PermissionViolationEvent
+
         event = PermissionViolationEvent(
             run_id=ctx.run_id,
             thread_id=ctx.thread_id,
@@ -131,4 +133,5 @@ def _intercept(url: str) -> None:
         )
         # Re-raise as PermissionDeniedError
         from ._models import PermissionDeniedError
-        raise PermissionDeniedError(event)
+
+        raise PermissionDeniedError(event) from _exc

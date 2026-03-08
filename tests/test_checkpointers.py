@@ -3,8 +3,6 @@
 import tempfile
 from datetime import datetime
 
-import pytest
-
 from aegis import Checkpoint
 from aegis.checkpointers import MemoryCheckpointer, SqliteCheckpointer
 
@@ -25,6 +23,7 @@ def _make_ckpt(step: int, thread_id: str = "t1", graph_name: str = "g") -> Check
 
 
 # ── MemoryCheckpointer ────────────────────────────────────────────────────────
+
 
 async def test_memory_save_and_get_latest():
     cp = MemoryCheckpointer()
@@ -108,56 +107,88 @@ async def test_memory_separate_threads():
 
 # ── SqliteCheckpointer ────────────────────────────────────────────────────────
 
+
 async def test_sqlite_save_and_get_latest():
     with tempfile.NamedTemporaryFile(suffix=".db") as f:
-        cp = SqliteCheckpointer(f.name)
-        await cp.save(_make_ckpt(0))
-        await cp.save(_make_ckpt(1))
-        latest = await cp.get_latest("t1", "g")
-        assert latest is not None
-        assert latest.step == 1
+        async with SqliteCheckpointer(f.name) as cp:
+            await cp.save(_make_ckpt(0))
+            await cp.save(_make_ckpt(1))
+            latest = await cp.get_latest("t1", "g")
+            assert latest is not None
+            assert latest.step == 1
 
 
 async def test_sqlite_get_by_step():
     with tempfile.NamedTemporaryFile(suffix=".db") as f:
-        cp = SqliteCheckpointer(f.name)
-        for i in range(3):
-            await cp.save(_make_ckpt(i))
-        ckpt = await cp.get_by_step("t1", "g", 2)
-        assert ckpt is not None
-        assert ckpt.step == 2
+        async with SqliteCheckpointer(f.name) as cp:
+            for i in range(3):
+                await cp.save(_make_ckpt(i))
+            ckpt = await cp.get_by_step("t1", "g", 2)
+            assert ckpt is not None
+            assert ckpt.step == 2
 
 
 async def test_sqlite_get_history_ordered():
     with tempfile.NamedTemporaryFile(suffix=".db") as f:
-        cp = SqliteCheckpointer(f.name)
-        for i in [1, 0, 2]:
-            await cp.save(_make_ckpt(i))
-        history = await cp.get_history("t1", "g")
-        assert [c.step for c in history] == [0, 1, 2]
+        async with SqliteCheckpointer(f.name) as cp:
+            for i in [1, 0, 2]:
+                await cp.save(_make_ckpt(i))
+            history = await cp.get_history("t1", "g")
+            assert [c.step for c in history] == [0, 1, 2]
 
 
 async def test_sqlite_delete_thread():
     with tempfile.NamedTemporaryFile(suffix=".db") as f:
-        cp = SqliteCheckpointer(f.name)
-        await cp.save(_make_ckpt(0))
-        await cp.delete_thread("t1", "g")
-        assert await cp.get_history("t1", "g") == []
+        async with SqliteCheckpointer(f.name) as cp:
+            await cp.save(_make_ckpt(0))
+            await cp.delete_thread("t1", "g")
+            assert await cp.get_history("t1", "g") == []
 
 
 async def test_sqlite_returns_none_for_missing():
     with tempfile.NamedTemporaryFile(suffix=".db") as f:
-        cp = SqliteCheckpointer(f.name)
-        assert await cp.get_latest("no-thread", "g") is None
+        async with SqliteCheckpointer(f.name) as cp:
+            assert await cp.get_latest("no-thread", "g") is None
 
 
 async def test_sqlite_state_snapshot_roundtrip():
     with tempfile.NamedTemporaryFile(suffix=".db") as f:
-        cp = SqliteCheckpointer(f.name)
-        ckpt = _make_ckpt(0)
-        ckpt.state_snapshot["nested"] = {"a": 1, "b": [1, 2, 3]}
-        await cp.save(ckpt)
-        loaded = await cp.get_by_step("t1", "g", 0)
-        assert loaded is not None
-        assert loaded.state_snapshot["nested"]["a"] == 1
-        assert loaded.state_snapshot["nested"]["b"] == [1, 2, 3]
+        async with SqliteCheckpointer(f.name) as cp:
+            ckpt = _make_ckpt(0)
+            ckpt.state_snapshot["nested"] = {"a": 1, "b": [1, 2, 3]}
+            await cp.save(ckpt)
+            loaded = await cp.get_by_step("t1", "g", 0)
+            assert loaded is not None
+            assert loaded.state_snapshot["nested"]["a"] == 1
+            assert loaded.state_snapshot["nested"]["b"] == [1, 2, 3]
+
+
+# ── PostgresCheckpointer table_name validation ────────────────────────────────
+
+
+def test_postgres_checkpointer_rejects_invalid_table_name():
+    """PostgresCheckpointer must reject table names with SQL injection characters."""
+    import pytest
+
+    from aegis._config import PostgresCheckpointer
+
+    with pytest.raises(ValueError, match="invalid"):
+        PostgresCheckpointer("postgres://localhost/db", table_name="bad; DROP TABLE foo")
+
+    with pytest.raises(ValueError, match="invalid"):
+        PostgresCheckpointer("postgres://localhost/db", table_name="1starts_with_digit")
+
+    with pytest.raises(ValueError, match="invalid"):
+        PostgresCheckpointer("postgres://localhost/db", table_name="has-hyphen")
+
+
+def test_postgres_checkpointer_accepts_valid_table_name():
+    """PostgresCheckpointer should accept valid SQL identifiers."""
+    from aegis._config import PostgresCheckpointer
+
+    # Should not raise
+    cp = PostgresCheckpointer("postgres://localhost/db", table_name="aegis_checkpoints")
+    assert cp.table_name == "aegis_checkpoints"
+
+    cp2 = PostgresCheckpointer("postgres://localhost/db", table_name="_private_table")
+    assert cp2.table_name == "_private_table"

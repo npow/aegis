@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import fnmatch
-from typing import Optional
 from urllib.parse import urlparse
 
 from ._models import (
-    NetworkPermission,
     PermissionDeniedError,
     PermissionScope,
     PermissionViolationEvent,
@@ -16,7 +14,7 @@ from ._models import (
 
 def check_tool_permission(
     tool_name: str,
-    scope: Optional[PermissionScope],
+    scope: PermissionScope | None,
     run_id: str,
     thread_id: str,
     node_name: str,
@@ -26,6 +24,7 @@ def check_tool_permission(
         return
     if tool_name not in scope.tools:
         from datetime import datetime
+
         event = PermissionViolationEvent(
             run_id=run_id,
             thread_id=thread_id,
@@ -40,7 +39,7 @@ def check_tool_permission(
 
 def check_network_permission(
     url: str,
-    scope: Optional[PermissionScope],
+    scope: PermissionScope | None,
     run_id: str,
     thread_id: str,
     node_name: str,
@@ -54,12 +53,25 @@ def check_network_permission(
 
     domain = _extract_domain(url)
     if not domain:
-        return
+        # Deny requests with unparseable URLs when deny_all_others is active
+        from datetime import datetime
+
+        event = PermissionViolationEvent(
+            run_id=run_id,
+            thread_id=thread_id,
+            node_name=node_name,
+            violation_type="network_domain_denied",
+            attempted_action=f"HTTP request to {url!r} (unparseable URL)",
+            declared_scope=scope,
+            timestamp=datetime.utcnow(),
+        )
+        raise PermissionDeniedError(event)
 
     if _domain_matches_any(domain, net.allowed_domains):
         return
 
     from datetime import datetime
+
     event = PermissionViolationEvent(
         run_id=run_id,
         thread_id=thread_id,
@@ -74,8 +86,8 @@ def check_network_permission(
 
 def check_filesystem_permission(
     path: str,
-    operation: str,    # "read" | "write"
-    scope: Optional[PermissionScope],
+    operation: str,  # "read" | "write"
+    scope: PermissionScope | None,
     run_id: str,
     thread_id: str,
     node_name: str,
@@ -105,6 +117,7 @@ def _deny_fs(
     node_name: str,
 ) -> None:
     from datetime import datetime
+
     event = PermissionViolationEvent(
         run_id=run_id,
         thread_id=thread_id,

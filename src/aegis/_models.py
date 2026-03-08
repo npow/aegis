@@ -5,12 +5,13 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, Literal, Optional
-
+from typing import Any, Literal
 
 # ── State ─────────────────────────────────────────────────────────────────────
+
 
 @dataclass
 class AgentState:
@@ -23,7 +24,7 @@ class AgentState:
     thread_id: str = ""
     run_id: str = ""
 
-    def update(self, **kwargs: Any) -> "AgentState":
+    def update(self, **kwargs: Any) -> AgentState:
         """Return a new instance with specified fields replaced. Does not mutate self."""
         return dataclasses.replace(self, **kwargs)
 
@@ -32,7 +33,7 @@ class AgentState:
         return dataclasses.asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "AgentState":
+    def from_dict(cls, data: dict[str, Any]) -> AgentState:
         """Deserialize from a dict, ignoring unknown fields."""
         known = {f.name for f in dataclasses.fields(cls)}
         return cls(**{k: v for k, v in data.items() if k in known})
@@ -40,50 +41,53 @@ class AgentState:
 
 # ── Run Config ────────────────────────────────────────────────────────────────
 
+
 @dataclass
 class RunConfig:
     """Configuration for a single graph run."""
 
     thread_id: str
     # Allow test/local overrides without touching graph definition
-    checkpointer: Optional[Any] = None  # CheckpointerBase instance
+    checkpointer: Any | None = None  # CheckpointerBase instance
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
 # ── Checkpointing ─────────────────────────────────────────────────────────────
 
+
 @dataclass
 class Checkpoint:
     """Persisted, immutable snapshot of AgentState at a specific step."""
 
-    id: str                               # "ckpt_{graph}_{thread}_{step}_{state_hash}"
+    id: str  # "ckpt_{graph}_{thread}_{step}_{state_hash}"
     thread_id: str
     run_id: str
     graph_name: str
     graph_version: str
-    step: int                             # monotonically increasing within a run
-    node_name: str                        # node that just completed (or "__input__" for step 0)
-    state_snapshot: dict[str, Any]        # JSON-serialized AgentState
+    step: int  # monotonically increasing within a run
+    node_name: str  # node that just completed (or "__input__" for step 0)
+    state_snapshot: dict[str, Any]  # JSON-serialized AgentState
     created_at: datetime
-    parent_checkpoint_id: Optional[str]   # None for step 0; set for sequential steps
-    is_fork_root: bool = False            # True if created via fork()
+    parent_checkpoint_id: str | None  # None for step 0; set for sequential steps
+    is_fork_root: bool = False  # True if created via fork()
 
 
 @dataclass
 class CheckpointBackendConfig:
     type: Literal["memory", "sqlite", "postgres", "redis", "dynamodb"]
-    connection_string: Optional[str] = None
+    connection_string: str | None = None
     table_name: str = "aegis_checkpoints"
-    ttl_days: Optional[int] = None        # None = retain indefinitely
+    ttl_days: int | None = None  # None = retain indefinitely
 
 
 # ── Execution Tracing ─────────────────────────────────────────────────────────
+
 
 @dataclass
 class LLMCall:
     call_id: str
     model: str
-    system_prompt: Optional[str]
+    system_prompt: str | None
     user_prompt: str
     response: str
     input_tokens: int
@@ -102,7 +106,7 @@ class ToolCall:
     tool_name: str
     args: dict[str, Any]
     result: Any
-    error: Optional[str]
+    error: str | None
     latency_ms: int
     timestamp: datetime
     node_name: str
@@ -110,21 +114,21 @@ class ToolCall:
     permission_checked: bool = True
     permission_granted: bool = True
     required_human_approval: bool = False
-    human_approved: Optional[bool] = None
+    human_approved: bool | None = None
 
 
 @dataclass
 class NodeTrace:
     node_name: str
     started_at: datetime
-    completed_at: Optional[datetime]
+    completed_at: datetime | None
     input_state: dict[str, Any]
-    output_state: Optional[dict[str, Any]]
+    output_state: dict[str, Any] | None
     llm_calls: list[LLMCall] = field(default_factory=list)
     tool_calls: list[ToolCall] = field(default_factory=list)
     attempt: int = 1
     status: Literal["running", "completed", "failed", "retrying"] = "running"
-    error: Optional[str] = None
+    error: str | None = None
 
 
 @dataclass
@@ -134,7 +138,7 @@ class RunTrace:
     graph_name: str
     graph_version: str
     started_at: datetime
-    completed_at: Optional[datetime]
+    completed_at: datetime | None
     status: Literal["running", "completed", "failed", "paused", "budget_exceeded", "resumed"]
     nodes_executed: list[NodeTrace] = field(default_factory=list)
     total_input_tokens: int = 0
@@ -142,9 +146,9 @@ class RunTrace:
     total_cached_tokens: int = 0
     total_cost_usd: float = 0.0
     wall_time_seconds: float = 0.0
-    final_state: Optional[dict[str, Any]] = None
-    error: Optional[str] = None
-    parent_run_id: Optional[str] = None
+    final_state: dict[str, Any] | None = None
+    error: str | None = None
+    parent_run_id: str | None = None
     otel_trace_id: str = ""
 
     def add_llm_call(self, call: LLMCall) -> None:
@@ -156,11 +160,12 @@ class RunTrace:
 
 # ── Run Result ────────────────────────────────────────────────────────────────
 
+
 @dataclass
 class RunError:
     message: str
     exception_type: str
-    traceback: Optional[str] = None
+    traceback: str | None = None
 
 
 @dataclass
@@ -170,7 +175,7 @@ class RunResult:
     state: AgentState
     trace: RunTrace
     status: Literal["completed", "failed", "budget_exceeded", "paused"]
-    error: Optional[RunError] = None
+    error: RunError | None = None
 
     @property
     def run_id(self) -> str:
@@ -179,19 +184,20 @@ class RunResult:
 
 # ── Budget ────────────────────────────────────────────────────────────────────
 
+
 @dataclass
 class Budget:
-    max_tokens: Optional[int] = None
-    max_llm_cost_usd: Optional[float] = None
-    max_tool_calls: Optional[int] = None
-    max_wall_time_seconds: Optional[int] = None
+    max_tokens: int | None = None
+    max_llm_cost_usd: float | None = None
+    max_tool_calls: int | None = None
+    max_wall_time_seconds: int | None = None
     on_exceeded: Literal[
         "hard_stop",
         "pause_and_notify",
         "downgrade_model",
         "compress_context",
     ] = "hard_stop"
-    downgrade_to: Optional[str] = None   # required if on_exceeded="downgrade_model"
+    downgrade_to: str | None = None  # required if on_exceeded="downgrade_model"
     notify_at_pct: float = 0.80
 
 
@@ -202,7 +208,7 @@ class BudgetStatus:
     tool_calls_made: int = 0
     wall_time_seconds: float = 0.0
     pct_consumed: dict[str, float] = field(default_factory=dict)
-    exceeded_dimension: Optional[str] = None
+    exceeded_dimension: str | None = None
 
     def compute_pct(self, budget: Budget) -> None:
         pct: dict[str, float] = {}
@@ -230,29 +236,39 @@ class BudgetExceededEvent:
 @dataclass
 class BudgetDecision:
     action: Literal["hard_stop", "extend", "downgrade"]
-    updated_budget: Optional[Budget] = None
+    updated_budget: Budget | None = None
 
     @staticmethod
-    def hard_stop() -> "BudgetDecision":
+    def hard_stop() -> BudgetDecision:
         return BudgetDecision(action="hard_stop")
 
     @staticmethod
-    def extend(**budget_kwargs: Any) -> "BudgetDecision":
-        return BudgetDecision(action="extend", updated_budget=Budget(**budget_kwargs))
+    def extend(current_budget: Budget, **overrides: Any) -> BudgetDecision:
+        """Extend the *current* budget by overriding specific fields.
+
+        Example (inside a budget exceeded handler)::
+
+            return BudgetDecision.extend(event.budget, max_tokens=event.budget.max_tokens + 5000)
+        """
+        import dataclasses
+
+        updated = dataclasses.replace(current_budget, **overrides)
+        return BudgetDecision(action="extend", updated_budget=updated)
 
     @staticmethod
-    def downgrade(model: str) -> "BudgetDecision":
+    def downgrade(model: str) -> BudgetDecision:
         return BudgetDecision(action="downgrade", updated_budget=Budget(downgrade_to=model))
 
 
 # ── Permissions ───────────────────────────────────────────────────────────────
 
+
 @dataclass
 class NetworkPermission:
     allowed_domains: list[str] = field(default_factory=list)
     deny_all_others: bool = True
-    max_bytes_out_per_run: Optional[int] = None
-    max_bytes_in_per_run: Optional[int] = None
+    max_bytes_out_per_run: int | None = None
+    max_bytes_in_per_run: int | None = None
 
 
 @dataclass
@@ -269,12 +285,12 @@ class ApprovalPolicy:
     timeout_seconds: int = 3600
     on_timeout: Literal["hard_stop", "deny", "approve"] = "hard_stop"
     delivery: Literal["webhook", "slack", "email"] = "webhook"
-    delivery_target: Optional[str] = None
+    delivery_target: str | None = None
 
 
 @dataclass
 class PermissionScope:
-    tools: Optional[list[str]] = None        # None = all registered tools allowed
+    tools: list[str] | None = None  # None = all registered tools allowed
     network: NetworkPermission = field(default_factory=NetworkPermission)
     filesystem: FilesystemPermission = field(default_factory=FilesystemPermission)
     approval: ApprovalPolicy = field(default_factory=ApprovalPolicy)
@@ -297,6 +313,7 @@ class PermissionViolationEvent:
 
 
 # ── Testing ───────────────────────────────────────────────────────────────────
+
 
 @dataclass
 class CassetteEntry:
@@ -355,6 +372,7 @@ class CassetteReplayContext:
 
 # ── Eval ──────────────────────────────────────────────────────────────────────
 
+
 @dataclass
 class EvalAssertion:
     description: str
@@ -365,8 +383,8 @@ class ToolCallAssertion(EvalAssertion):
     tool_name: str = ""
     called: bool = True
     min_times: int = 1
-    max_times: Optional[int] = None
-    args_match: Optional[dict[str, Any]] = None
+    max_times: int | None = None
+    args_match: dict[str, Any] | None = None
 
 
 @dataclass
@@ -390,7 +408,7 @@ class EvalCase:
     id: str
     input: AgentState
     assertions: list[EvalAssertion]
-    cassette: Optional[str] = None
+    cassette: str | None = None
     tags: list[str] = field(default_factory=list)
     expected_status: Literal["completed", "failed"] = "completed"
 
@@ -411,7 +429,7 @@ class EvalSuiteResult:
     total_cases: int
     passed_cases: int
     pass_rate: float
-    llm_judge_score: Optional[float]
+    llm_judge_score: float | None
     case_results: list[EvalCaseResult]
     gate_passed: bool
     duration_seconds: float
@@ -440,13 +458,14 @@ class EvalSuiteResult:
         for r in self.case_results:
             icon = "✓" if r.passed else "✗"
             lines.append(f"  {icon} [{r.case_id}] ({r.duration_seconds:.2f}s)")
-            for assertion, ok, msg in r.assertion_results:
+            for _assertion, ok, msg in r.assertion_results:
                 if not ok:
                     lines.append(f"      FAIL: {msg}")
         return "\n".join(lines)
 
 
 # ── Custom Exceptions ─────────────────────────────────────────────────────────
+
 
 class AegisError(Exception):
     """Base class for all Aegis exceptions."""
@@ -456,17 +475,14 @@ class BudgetExceededError(AegisError):
     def __init__(self, event: BudgetExceededEvent) -> None:
         self.event = event
         super().__init__(
-            f"Budget exceeded: {event.exceeded_dimension} limit reached "
-            f"(run_id={event.run_id})"
+            f"Budget exceeded: {event.exceeded_dimension} limit reached (run_id={event.run_id})"
         )
 
 
 class PermissionDeniedError(AegisError):
     def __init__(self, event: PermissionViolationEvent) -> None:
         self.event = event
-        super().__init__(
-            f"Permission denied: {event.violation_type} — {event.attempted_action}"
-        )
+        super().__init__(f"Permission denied: {event.violation_type} — {event.attempted_action}")
 
 
 class AegisCassetteStaleError(AegisError):
