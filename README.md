@@ -3,7 +3,7 @@
 [![CI](https://github.com/npow/rampart/actions/workflows/ci.yml/badge.svg)](https://github.com/npow/rampart/actions/workflows/ci.yml)
 [![Release](https://github.com/npow/rampart/actions/workflows/release.yml/badge.svg)](https://github.com/npow/rampart/actions/workflows/release.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE) [![Docs](https://img.shields.io/badge/docs-mintlify-18a34a?style=flat-square)](https://mintlify.com/npow/rampart)
 
 **A runtime that makes LLM agents production-safe by default.**
 
