@@ -233,24 +233,10 @@ async def test_email_no_smtp_url_warns_and_applies_timeout():
 
 @pytest.mark.asyncio
 async def test_unknown_channel_denies():
-    import warnings
-
-    policy = ApprovalPolicy(
-        delivery="carrier_pigeon",  # type: ignore[arg-type]
-        timeout_seconds=5,
-        on_timeout="approve",
-    )
-
-    with warnings.catch_warnings(record=True):
-        warnings.simplefilter("always")
-        result = await request_approval(
-            tool_name="tool",
-            args={},
-            run_id="r1",
-            thread_id="t1",
-            node_name="n",
-            call_id="c7",
-            policy=policy,
+    """ApprovalPolicy now validates delivery at construction time."""
+    with pytest.raises(ValueError, match="Invalid delivery"):
+        ApprovalPolicy(
+            delivery="carrier_pigeon",  # type: ignore[arg-type]
+            timeout_seconds=5,
+            on_timeout="approve",
         )
-
-    assert result is False

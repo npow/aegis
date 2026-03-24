@@ -22,17 +22,70 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import multiprocessing
+import signal
+import threading
+import warnings
 from typing import Any
+
+# ── Module-level configuration (set via configure_sandbox) ────────────────────
+_max_workers: int = 4
+_start_method: str | None = None
 
 # Module-level process pool (lazy initialized, shared across all sandboxed runs).
 _pool: concurrent.futures.ProcessPoolExecutor | None = None
+_pool_lock = threading.Lock()
+
+
+def configure_sandbox(
+    max_workers: int = 4,
+    start_method: str | None = None,
+) -> None:
+    """Configure sandbox process pool settings.
+
+    Must be called before any sandboxed node executes (i.e. before the pool is
+    created).  Calling after the pool is already running has no effect on the
+    existing pool — call :func:`shutdown_sandbox` first if you need to
+    reconfigure.
+
+    Args:
+        max_workers: Maximum number of worker processes in the pool.
+        start_method: Multiprocessing start method (``"fork"``, ``"spawn"``,
+            ``"forkserver"``, or ``None`` for the platform default).
+    """
+    global _max_workers, _start_method
+    _max_workers = max_workers
+    _start_method = start_method
+
+
+def _pool_initializer() -> None:
+    """Initializer run in each pool worker process.
+
+    Resets inherited state that should not leak from the parent process:
+    - Restores default signal handlers (the parent may have custom ones).
+    - Clears any thread-local state that could have been inherited via fork.
+    """
+    # Restore default signal handling so that workers respond normally to
+    # SIGINT/SIGTERM rather than inheriting the parent's handlers.
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
 
 
 def _get_pool() -> concurrent.futures.ProcessPoolExecutor:
     global _pool
-    if _pool is None:
-        _pool = concurrent.futures.ProcessPoolExecutor(max_workers=4)
-    return _pool
+    with _pool_lock:
+        if _pool is None:
+            mp_context = (
+                multiprocessing.get_context(_start_method)
+                if _start_method is not None
+                else None
+            )
+            _pool = concurrent.futures.ProcessPoolExecutor(
+                max_workers=_max_workers,
+                mp_context=mp_context,
+                initializer=_pool_initializer,
+            )
+        return _pool
 
 
 def _run_node_in_subprocess(
@@ -48,6 +101,12 @@ def _run_node_in_subprocess(
     2. Reconstructs the AgentState from its dict representation.
     3. Runs the async node function via ``asyncio.run()``.
     4. Returns the result as a plain dict for pickling back to the parent.
+
+    Note:
+        ``state_class`` must be picklable for cross-process serialization.  This
+        is satisfied by module-level ``@dataclass`` definitions (the default for
+        ``AgentState`` subclasses).  Lambda-defined or closure-based classes will
+        fail under the ``"spawn"`` start method.
     """
     import asyncio as _asyncio
     import dataclasses
@@ -62,8 +121,8 @@ def _run_node_in_subprocess(
                 _res.setrlimit(_res.RLIMIT_AS, (mem_bytes, mem_bytes))
             if max_cpu_seconds is not None:
                 _res.setrlimit(_res.RLIMIT_CPU, (max_cpu_seconds, max_cpu_seconds))
-        except (ImportError, OSError, ValueError):
-            pass  # Not available on this platform; continue without limits
+        except (ImportError, OSError, ValueError) as exc:
+            warnings.warn(f"Could not set resource limits: {exc}")
 
     # ── Reconstruct state ────────────────────────────────────────────────────
     known = {f.name for f in dataclasses.fields(state_class)}

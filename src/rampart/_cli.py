@@ -99,18 +99,19 @@ def run(graph_name: str, input_json: str, thread_id: str | None, checkpointer: s
 @main.command()
 @click.argument("graph_name")
 @click.option("--thread-id", required=True, help="Thread ID to resume")
-def resume(graph_name: str, thread_id: str) -> None:
+@click.option("--checkpointer", default="sqlite", show_default=True)
+def resume(graph_name: str, thread_id: str, checkpointer: str) -> None:
     """Resume a failed or interrupted run from its last checkpoint."""
     from rampart._decorators import _GRAPH_REGISTRY
     from rampart._models import RunConfig
-    from rampart.checkpointers import SqliteCheckpointer
+    from rampart.checkpointers import MemoryCheckpointer, SqliteCheckpointer
 
     graph_def = _GRAPH_REGISTRY.get(graph_name)
     if graph_def is None:
         click.echo(f"Graph '{graph_name}' not found.", err=True)
         raise SystemExit(1)
 
-    cp = SqliteCheckpointer()
+    cp = SqliteCheckpointer() if checkpointer == "sqlite" else MemoryCheckpointer()
     config = RunConfig(thread_id=thread_id, checkpointer=cp)
     result = asyncio.run(graph_def.resume(thread_id=thread_id, config=config))
 
@@ -250,6 +251,26 @@ def permissions(graph_name: str) -> None:
             click.echo(f"           read_paths={fs.read_allowed_paths}")
         if fs.write_allowed_paths:
             click.echo(f"           write_paths={fs.write_allowed_paths}")
+
+    # Show per-tool permissions
+    from rampart._decorators import _TOOL_REGISTRY
+
+    tools_with_perms = {
+        name: td
+        for name, td in _TOOL_REGISTRY.items()
+        if td.require_human_approval or td.permissions is not None
+    }
+    if tools_with_perms:
+        click.echo("  Per-tool:")
+        for name, td in tools_with_perms.items():
+            flags: list[str] = []
+            if td.require_human_approval:
+                flags.append(
+                    f"require_human_approval (timeout={td.approval_timeout_seconds}s, on_timeout={td.approval_on_timeout})"
+                )
+            if td.permissions:
+                flags.append(f"permissions={td.permissions}")
+            click.echo(f"    {name}: {', '.join(flags)}")
 
 
 @main.command()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime
 from pathlib import Path
@@ -24,10 +25,19 @@ class SqliteCheckpointer:
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._db: Any | None = None  # aiosqlite.Connection
+        self._db_lock: asyncio.Lock | None = None  # created lazily
 
     async def _get_db(self) -> Any:  # aiosqlite.Connection
         if self._db is not None:
             return self._db
+        if self._db_lock is None:
+            self._db_lock = asyncio.Lock()
+        async with self._db_lock:
+            if self._db is not None:
+                return self._db
+            return await self._init_db()
+
+    async def _init_db(self) -> Any:
         try:
             import aiosqlite  # type: ignore[import]
         except ImportError as exc:
@@ -43,6 +53,7 @@ class SqliteCheckpointer:
         await self._init_schema(db)
         self._db = db
         return db
+
 
     async def _init_schema(self, db: Any) -> None:
         await db.execute(

@@ -45,19 +45,22 @@ class MemoryCheckpointer:
 
     async def get_latest(self, thread_id: str, graph_name: str) -> Checkpoint | None:
         key = (thread_id, graph_name)
-        checkpoints = self._store.get(key, [])
-        return checkpoints[-1] if checkpoints else None
+        async with self._lock:
+            checkpoints = self._store.get(key, [])
+            return checkpoints[-1] if checkpoints else None
 
     async def get_by_step(self, thread_id: str, graph_name: str, step: int) -> Checkpoint | None:
         key = (thread_id, graph_name)
-        for ckpt in self._store.get(key, []):
-            if ckpt.step == step:
-                return ckpt
-        return None
+        async with self._lock:
+            for ckpt in self._store.get(key, []):
+                if ckpt.step == step:
+                    return ckpt
+            return None
 
     async def get_history(self, thread_id: str, graph_name: str) -> list[Checkpoint]:
         key = (thread_id, graph_name)
-        return list(self._store.get(key, []))
+        async with self._lock:
+            return list(self._store.get(key, []))
 
     async def delete_thread(self, thread_id: str, graph_name: str) -> None:
         key = (thread_id, graph_name)

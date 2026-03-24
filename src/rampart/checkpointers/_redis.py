@@ -32,10 +32,20 @@ class RedisCheckpointer:
         self._key_prefix = key_prefix
         self._ttl_seconds = int(ttl_days * 86400) if ttl_days else None
         self._client: Any | None = None
+        self._client_lock: Any = None  # asyncio.Lock, created lazily
 
     async def _get_client(self) -> Any:
         if self._client is not None:
             return self._client
+        import asyncio as _asyncio
+        if self._client_lock is None:
+            self._client_lock = _asyncio.Lock()
+        async with self._client_lock:
+            if self._client is not None:
+                return self._client
+            return await self._init_client()
+
+    async def _init_client(self) -> Any:
         try:
             from redis.asyncio import Redis  # type: ignore[import]
         except ImportError as exc:

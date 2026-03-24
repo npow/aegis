@@ -1,8 +1,9 @@
 """HTTP transport Layer 1 — Python library monkey-patching.
 
 Intercepts outbound HTTP calls when inside an Rampart graph run and checks
-them against the active permission scope. Covers httpx and requests.
-Layer 2 (proxy injection) and Layer 3 (sandbox) are stubs in this release.
+them against the active permission scope. Covers httpx, requests, urllib3,
+and aiohttp. Layer 2 (proxy injection) and Layer 3 (sandbox) are stubs in
+this release.
 """
 
 from __future__ import annotations
@@ -18,13 +19,19 @@ _originals: dict[str, Any] = {}
 
 
 def install() -> None:
-    """Monkey-patch HTTP libraries. Called once at rampart import time."""
+    """Monkey-patch HTTP libraries. Called once at rampart import time.
+
+    Note: In forked subprocesses, call ``uninstall()`` then ``install()`` to
+    re-apply patches, as monkey-patched methods may not survive fork correctly.
+    """
     global _installed
     with _lock:
         if _installed:
             return
         _patch_httpx()
         _patch_requests()
+        _patch_urllib3()
+        _patch_aiohttp()
         _installed = True
 
 
@@ -34,6 +41,8 @@ def uninstall() -> None:
     with _lock:
         _restore_httpx()
         _restore_requests()
+        _restore_urllib3()
+        _restore_aiohttp()
         _installed = False
 
 
@@ -96,13 +105,70 @@ def _restore_requests() -> None:
         requests.Session.send = _originals.pop("requests")  # type: ignore[method-assign]
 
 
+def _patch_urllib3() -> None:
+    try:
+        import urllib3  # type: ignore[import]
+    except ImportError:
+        return
+
+    orig = urllib3.HTTPConnectionPool.urlopen
+    _originals["urllib3"] = orig
+
+    def _patched_urlopen(self: Any, method: Any, url: Any, *args: Any, **kwargs: Any) -> Any:
+        # Build the full URL from the pool's scheme/host/port and the request path
+        scheme = self.scheme
+        host = self.host
+        port = self.port
+        base = f"{scheme}://{host}" if not port else f"{scheme}://{host}:{port}"
+        full_url = f"{base}{url}" if url.startswith("/") else url
+        _intercept(full_url)
+        return orig(self, method, url, *args, **kwargs)
+
+    urllib3.HTTPConnectionPool.urlopen = _patched_urlopen  # type: ignore[method-assign]
+
+
+def _restore_urllib3() -> None:
+    try:
+        import urllib3  # type: ignore[import]
+    except ImportError:
+        return
+    if "urllib3" in _originals:
+        urllib3.HTTPConnectionPool.urlopen = _originals.pop("urllib3")  # type: ignore[method-assign]
+
+
+def _patch_aiohttp() -> None:
+    try:
+        import aiohttp  # type: ignore[import]
+    except ImportError:
+        return
+
+    orig = aiohttp.ClientSession._request
+    _originals["aiohttp"] = orig
+
+    async def _patched_request(self: Any, method: Any, url: Any, *args: Any, **kwargs: Any) -> Any:
+        _intercept(str(url))
+        return await orig(self, method, url, *args, **kwargs)
+
+    aiohttp.ClientSession._request = _patched_request  # type: ignore[method-assign]
+
+
+def _restore_aiohttp() -> None:
+    try:
+        import aiohttp  # type: ignore[import]
+    except ImportError:
+        return
+    if "aiohttp" in _originals:
+        aiohttp.ClientSession._request = _originals.pop("aiohttp")  # type: ignore[method-assign]
+
+
 def _intercept(url: str) -> None:
     """Check the URL against the active run's permission scope."""
     from ._context import _run_context
 
     ctx = _run_context.get()
     if ctx is None:
-        return  # Not inside a graph run — allow all traffic
+        # Not inside a graph run — no permission scope active, allow all traffic
+        return
 
     if not ctx.permission_scope:
         return
@@ -118,7 +184,7 @@ def _intercept(url: str) -> None:
             node_name=ctx.current_node_name or "unknown",
         )
     except Exception as _exc:
-        from datetime import datetime
+        from datetime import datetime, timezone
 
         from ._models import PermissionViolationEvent
 
@@ -129,7 +195,7 @@ def _intercept(url: str) -> None:
             violation_type="http_intercept_blocked",
             attempted_action=f"HTTP {url}",
             declared_scope=ctx.permission_scope,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
         )
         # Re-raise as PermissionDeniedError
         from ._models import PermissionDeniedError

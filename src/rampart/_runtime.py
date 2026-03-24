@@ -9,7 +9,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from ._artifacts import ArtifactContext
@@ -85,7 +85,7 @@ async def _run_graph(
         thread_id=config.thread_id,
         graph_name=graph_def.name,
         graph_version=graph_def.version,
-        started_at=datetime.utcnow(),
+        started_at=datetime.now(timezone.utc),
         completed_at=None,
         status="running" if not is_resume else "resumed",
         parent_run_id=parent_run_id,
@@ -169,6 +169,9 @@ async def _run_graph(
             message=str(exc),
             exception_type=type(exc).__name__,
         )
+    except asyncio.CancelledError:
+        trace.status = "cancelled"
+        raise
     except Exception as exc:
         import traceback as tb
 
@@ -181,10 +184,17 @@ async def _run_graph(
         )
     finally:
         _run_context.reset(token)
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         trace.completed_at = now
         trace.wall_time_seconds = (now - trace.started_at).total_seconds()
         trace.final_state = _serialize_state(result_state)
+
+        if trace.status in ("failed", "cancelled", "budget_exceeded"):
+            try:
+                terminal_ckpt = _make_checkpoint(ctx=ctx, step=ctx._step_counter, node_name="__terminal__", state=result_state, parent_id=ctx.last_checkpoint_id)
+                await checkpointer.save(terminal_ckpt)
+            except Exception:
+                pass  # Best-effort terminal checkpoint
 
         # Finalize cassette recording
         if cassette_mode == "record" and cassette is not None:
@@ -211,6 +221,15 @@ async def _resume_graph(
         raise NoCheckpointError(
             f"No checkpoints found for thread '{thread_id}' in graph '{graph_def.name}'. "
             "Cannot resume."
+        )
+
+    if history and history[0].graph_version != graph_def.version:
+        from ._models import GraphVersionConflict
+
+        raise GraphVersionConflict(
+            f"Graph version mismatch: checkpoints are version '{history[0].graph_version}' "
+            f"but graph is now version '{graph_def.version}'. "
+            "Use graph.fork() to migrate, or delete old checkpoints."
         )
 
     # Build existing checkpoints map
@@ -287,7 +306,7 @@ async def _fork_graph(
         step=target.step,
         node_name=target.node_name,
         state_snapshot=merged_state_dict,
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
         parent_checkpoint_id=target.parent_checkpoint_id,
         is_fork_root=True,
     )
@@ -373,6 +392,14 @@ async def _execute_node_in_context(
     # Fast-forward: return cached state if this step has a completed checkpoint
     if step <= ctx._fast_forward_to_step and step in ctx._existing_checkpoints:
         cached = ctx._existing_checkpoints[step]
+        if cached.node_name != node_def.name:
+            import warnings
+
+            warnings.warn(
+                f"Fast-forward step {step}: cached node '{cached.node_name}' != "
+                f"current node '{node_def.name}'. Graph structure may have changed.",
+                stacklevel=2,
+            )
         state_type = type(state)
         return _deserialize_state(cached.state_snapshot, state_type)
 
@@ -382,7 +409,7 @@ async def _execute_node_in_context(
     # Create node trace
     node_trace = NodeTrace(
         node_name=node_def.name,
-        started_at=datetime.utcnow(),
+        started_at=datetime.now(timezone.utc),
         completed_at=None,
         input_state=_serialize_state(state),
         output_state=None,
@@ -457,14 +484,17 @@ async def _execute_with_retry(
                 result = await coro
 
             node_trace.status = "completed"
-            node_trace.completed_at = datetime.utcnow()
+            node_trace.completed_at = datetime.now(timezone.utc)
             node_trace.output_state = _serialize_state(result)
             return result
 
         except BudgetExceededError:
             # Never retry on budget exceeded — propagate immediately
             node_trace.status = "failed"
-            node_trace.completed_at = datetime.utcnow()
+            node_trace.completed_at = datetime.now(timezone.utc)
+            raise
+
+        except asyncio.CancelledError:
             raise
 
         except Exception as exc:
@@ -484,7 +514,7 @@ async def _execute_with_retry(
 
     # All retries exhausted
     node_trace.status = "failed"
-    node_trace.completed_at = datetime.utcnow()
+    node_trace.completed_at = datetime.now(timezone.utc)
     node_trace.error = str(last_exc)
     if last_exc is None:
         raise RuntimeError(
@@ -562,7 +592,7 @@ def _make_checkpoint(
         step=step,
         node_name=node_name,
         state_snapshot=state_dict,
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
         parent_checkpoint_id=parent_id,
     )
 
@@ -570,15 +600,29 @@ def _make_checkpoint(
 def _serialize_state(state: AgentState) -> dict[str, Any]:
     import dataclasses
 
-    return dataclasses.asdict(state)
+    d = dataclasses.asdict(state)
+    d["__type__"] = f"{type(state).__module__}.{type(state).__qualname__}"
+    return d
 
 
 def _deserialize_state(data: dict[str, Any], state_type: type) -> AgentState:
     import dataclasses
 
-    known = {f.name for f in dataclasses.fields(state_type)}
-    result: AgentState = state_type(**{k: v for k, v in data.items() if k in known})
-    return result
+    known = {f.name: f for f in dataclasses.fields(state_type)}
+    filtered = {}
+    for k, v in data.items():
+        if k == "__type__":
+            continue
+        if k in known:
+            field_type = known[k].type
+            # Attempt to reconstruct nested dataclasses
+            if isinstance(v, dict) and isinstance(field_type, type) and dataclasses.is_dataclass(field_type):
+                try:
+                    v = field_type(**{fk: fv for fk, fv in v.items() if fk in {f.name for f in dataclasses.fields(field_type)}})
+                except Exception:
+                    pass
+            filtered[k] = v
+    return state_type(**filtered)
 
 
 def _infer_state_type(graph_def: GraphDef) -> type:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fnmatch
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 from ._models import (
@@ -23,8 +24,6 @@ def check_tool_permission(
     if scope is None or scope.tools is None:
         return
     if tool_name not in scope.tools:
-        from datetime import datetime
-
         event = PermissionViolationEvent(
             run_id=run_id,
             thread_id=thread_id,
@@ -32,7 +31,7 @@ def check_tool_permission(
             violation_type="tool_not_in_whitelist",
             attempted_action=f"call tool '{tool_name}'",
             declared_scope=scope,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
         )
         raise PermissionDeniedError(event)
 
@@ -54,8 +53,6 @@ def check_network_permission(
     domain = _extract_domain(url)
     if not domain:
         # Deny requests with unparseable URLs when deny_all_others is active
-        from datetime import datetime
-
         event = PermissionViolationEvent(
             run_id=run_id,
             thread_id=thread_id,
@@ -63,14 +60,12 @@ def check_network_permission(
             violation_type="network_domain_denied",
             attempted_action=f"HTTP request to {url!r} (unparseable URL)",
             declared_scope=scope,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
         )
         raise PermissionDeniedError(event)
 
     if _domain_matches_any(domain, net.allowed_domains):
         return
-
-    from datetime import datetime
 
     event = PermissionViolationEvent(
         run_id=run_id,
@@ -79,7 +74,7 @@ def check_network_permission(
         violation_type="network_domain_denied",
         attempted_action=f"HTTP request to {url}",
         declared_scope=scope,
-        timestamp=datetime.utcnow(),
+        timestamp=datetime.now(timezone.utc),
     )
     raise PermissionDeniedError(event)
 
@@ -116,8 +111,6 @@ def _deny_fs(
     thread_id: str,
     node_name: str,
 ) -> None:
-    from datetime import datetime
-
     event = PermissionViolationEvent(
         run_id=run_id,
         thread_id=thread_id,
@@ -125,7 +118,7 @@ def _deny_fs(
         violation_type="filesystem_path_denied",
         attempted_action=f"{operation} '{path}'",
         declared_scope=scope,
-        timestamp=datetime.utcnow(),
+        timestamp=datetime.now(timezone.utc),
     )
     raise PermissionDeniedError(event)
 
@@ -133,9 +126,7 @@ def _deny_fs(
 def _extract_domain(url: str) -> str:
     try:
         parsed = urlparse(url)
-        # Strip port number
-        host = parsed.netloc.split(":")[0]
-        return host
+        return parsed.hostname or ""
     except Exception:
         return ""
 

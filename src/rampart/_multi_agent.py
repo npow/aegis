@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import functools
+import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from ._decorators import GraphDef
@@ -30,7 +33,7 @@ class ChainGraph:
         last_result: RunResult | None = None
         for i, g in enumerate(self.graphs):
             sub_config = RunConfig(
-                thread_id=f"{config.thread_id}-chain-{i}",
+                thread_id=f"{config.thread_id}-chain-{i}-{uuid.uuid4().hex[:6]}",
                 checkpointer=config.checkpointer,
                 metadata=config.metadata,
             )
@@ -77,6 +80,11 @@ class ParallelGraph:
             tasks.append(asyncio.create_task(g.run(input=input, config=sub_config, **kwargs)))
         try:
             return list(await asyncio.gather(*tasks))
+        except asyncio.CancelledError:
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
         except Exception:
             # Cancel any still-running branches to avoid orphaned tasks
             for t in tasks:
@@ -110,6 +118,11 @@ class ParallelWithJoin:
             tasks.append(asyncio.create_task(g.run(input=input, config=sub_config, **kwargs)))
         try:
             results: list[RunResult] = list(await asyncio.gather(*tasks))
+        except asyncio.CancelledError:
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
         except Exception:
             for t in tasks:
                 t.cancel()
@@ -178,18 +191,15 @@ class SupervisorGraph:
 
             specialist = self.specialists.get(specialist_key)
             if specialist is None:
-                import uuid as _uuid
-                from datetime import datetime
-
                 from ._models import RunError, RunTrace
 
                 trace = RunTrace(
-                    run_id=f"run-{_uuid.uuid4().hex[:8]}",
+                    run_id=f"run-{uuid.uuid4().hex[:8]}",
                     thread_id=config.thread_id,
                     graph_name="supervisor",
                     graph_version="1.0.0",
-                    started_at=datetime.utcnow(),
-                    completed_at=datetime.utcnow(),
+                    started_at=datetime.now(timezone.utc),
+                    completed_at=datetime.now(timezone.utc),
                     status="failed",
                     error=f"Unknown specialist: '{specialist_key}'",
                 )
@@ -213,19 +223,18 @@ class SupervisorGraph:
                     specialist.run(input=router_result.state, config=spec_config, **kwargs),
                     timeout=self.handoff_timeout,
                 )
+            except asyncio.CancelledError:
+                raise
             except asyncio.TimeoutError:
-                import uuid as _uuid
-                from datetime import datetime
-
                 from ._models import RunError, RunTrace
 
                 trace = RunTrace(
-                    run_id=f"run-{_uuid.uuid4().hex[:8]}",
+                    run_id=f"run-{uuid.uuid4().hex[:8]}",
                     thread_id=config.thread_id,
                     graph_name="supervisor",
                     graph_version="1.0.0",
-                    started_at=datetime.utcnow(),
-                    completed_at=datetime.utcnow(),
+                    started_at=datetime.now(timezone.utc),
+                    completed_at=datetime.now(timezone.utc),
                     status="failed",
                     error=f"Specialist '{specialist_key}' timed out after {self.handoff_timeout}s",
                 )
@@ -248,18 +257,15 @@ class SupervisorGraph:
                 return spec_result
 
         # Max handoffs reached
-        import uuid as _uuid
-        from datetime import datetime
-
         from ._models import RunError, RunTrace
 
         trace = RunTrace(
-            run_id=f"run-{_uuid.uuid4().hex[:8]}",
+            run_id=f"run-{uuid.uuid4().hex[:8]}",
             thread_id=config.thread_id,
             graph_name="supervisor",
             graph_version="1.0.0",
-            started_at=datetime.utcnow(),
-            completed_at=datetime.utcnow(),
+            started_at=datetime.now(timezone.utc),
+            completed_at=datetime.now(timezone.utc),
             status="failed",
             error=f"Max handoffs ({self.max_handoffs}) exceeded",
         )
@@ -293,15 +299,21 @@ def supervisor(
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
+@functools.lru_cache(maxsize=32)
+def _get_merged_state_class(base_type: type) -> type:
+    @dataclass
+    class _MergedState(base_type):  # type: ignore[misc]
+        _parallel_results: list = field(default_factory=list)
+    return _MergedState
+
+
 def _merge_parallel_results(original: AgentState, results: list[RunResult]) -> AgentState:
     """Attach parallel results to the state as _parallel_results attribute."""
     # We use a simple convention: attach the results as a dynamic attribute
     # The join graph node can access state._parallel_results
     import dataclasses
 
-    @dataclass
-    class _MergedState(type(original)):  # type: ignore[misc]
-        _parallel_results: list[RunResult] = field(default_factory=list)
+    _MergedState = _get_merged_state_class(type(original))
 
     try:
         merged = _MergedState(

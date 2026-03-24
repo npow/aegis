@@ -7,7 +7,7 @@ import time
 import uuid
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from ._models import (
@@ -216,8 +216,21 @@ class RunContext:
         # 4. Permission check
         self._check_tool_permission(tool_name, node_name)
 
-        # 4b. Human-approval gate
+        # 4b. Resolve tool definition
         tool_def = self.tool_registry.get(tool_name)
+
+        # Check per-tool permissions if defined
+        if tool_def is not None and tool_def.permissions is not None:
+            # Per-tool permissions are declared but not yet enforced — raise NotImplementedError
+            # to prevent silent permission bypass until full implementation lands.
+            import warnings
+            warnings.warn(
+                f"Tool '{tool_name}' declares per-tool permissions but enforcement is not yet "
+                "implemented. The tool will execute with graph-level permissions only.",
+                stacklevel=2,
+            )
+
+        # 4c. Human-approval gate
         if tool_def is not None and tool_def.require_human_approval:
             from ._approval import request_approval
             from ._models import ApprovalPolicy
@@ -247,7 +260,7 @@ class RunContext:
                     violation_type="tool_not_in_whitelist",
                     attempted_action=f"human approval denied for tool '{tool_name}'",
                     declared_scope=self.permission_scope,
-                    timestamp=datetime.utcnow(),
+                    timestamp=datetime.now(timezone.utc),
                 )
                 raise PermissionDeniedError(event)
 
@@ -271,7 +284,7 @@ class RunContext:
                 result=result,
                 error=error,
                 latency_ms=latency_ms,
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(timezone.utc),
                 node_name=node_name,
                 permission_checked=True,
                 permission_granted=True,
@@ -290,7 +303,7 @@ class RunContext:
                     node_name=node_name,
                     request={"tool_name": tool_name, "args": _safe_serialize(kwargs)},
                     response={"result": _safe_serialize(result), "error": error},
-                    timestamp=datetime.utcnow(),
+                    timestamp=datetime.now(timezone.utc),
                 )
                 self.cassette.entries.append(entry)
 
@@ -325,7 +338,7 @@ class RunContext:
                 result=result,
                 error=error,
                 latency_ms=latency_ms,
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(timezone.utc),
                 node_name=node_name,
                 was_mocked=True,
                 permission_checked=False,
@@ -354,7 +367,7 @@ class RunContext:
                     node_name=node_name,
                     request={"tool_name": tool_name, "args": _safe_serialize(kwargs)},
                     response={"result": _safe_serialize(result), "error": error},
-                    timestamp=datetime.utcnow(),
+                    timestamp=datetime.now(timezone.utc),
                 )
                 self.cassette.entries.append(cassette_entry)
 
@@ -407,7 +420,7 @@ class RunContext:
             result=result,
             error=None,
             latency_ms=latency_ms,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             node_name=node_name,
             was_mocked=False,
         )
@@ -428,8 +441,6 @@ class RunContext:
             return
         scope = self.permission_scope
         if scope.tools is not None and tool_name not in scope.tools:
-            from datetime import datetime
-
             from ._models import PermissionDeniedError, PermissionViolationEvent
 
             event = PermissionViolationEvent(
@@ -439,7 +450,7 @@ class RunContext:
                 violation_type="tool_not_in_whitelist",
                 attempted_action=f"call tool '{tool_name}'",
                 declared_scope=scope,
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(timezone.utc),
             )
             raise PermissionDeniedError(event)
 
@@ -452,6 +463,12 @@ class RunContext:
     ) -> LLMResponse:
         """Execute an LLM call, serving from cassette if in replay mode."""
         import time as _time
+
+        if kwargs.get("stream", False):
+            raise ValueError(
+                "Streaming LLM calls are not supported through execute_llm_call(). "
+                "Use the LLM provider's streaming API directly if needed."
+            )
 
         # Apply model override from budget downgrade
         effective_model = self.llm_model_override or model
@@ -498,7 +515,7 @@ class RunContext:
             cached_tokens=cached_tokens,
             cost_usd=cost_usd,
             latency_ms=latency_ms,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             node_name=node_name,
         )
 
@@ -524,7 +541,7 @@ class RunContext:
                         "cost_usd": cost_usd,
                     }
                 ),
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(timezone.utc),
             )
             self.cassette.entries.append(entry)
 
@@ -593,7 +610,7 @@ class RunContext:
             cached_tokens=0,
             cost_usd=resp.get("cost_usd", 0.0),
             latency_ms=latency_ms,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             node_name=node_name,
             was_replayed=True,
         )
@@ -694,14 +711,18 @@ class GraphContext:
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-def _safe_serialize(obj: Any) -> Any:
-    """Best-effort JSON-safe serialization."""
+def _safe_serialize(obj: Any, *, strict: bool = False) -> Any:
+    """Best-effort JSON-safe serialization.
+
+    When *strict* is True, raise TypeError instead of silently coercing
+    non-serializable objects to their string representation.
+    """
     if isinstance(obj, (str, int, float, bool, type(None))):
         return obj
     if isinstance(obj, dict):
-        return {k: _safe_serialize(v) for k, v in obj.items()}
+        return {k: _safe_serialize(v, strict=strict) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
-        return [_safe_serialize(v) for v in obj]
+        return [_safe_serialize(v, strict=strict) for v in obj]
     try:
         import dataclasses as dc
 
@@ -709,4 +730,6 @@ def _safe_serialize(obj: Any) -> Any:
             return dc.asdict(obj)
     except Exception:
         pass
+    if strict:
+        raise TypeError(f"Cannot serialize {type(obj).__name__}: {obj!r}")
     return str(obj)

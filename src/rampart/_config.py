@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from datetime import datetime
 from typing import Any
+
+_pg_lock_init = threading.Lock()
 
 
 def configure(
@@ -106,7 +109,9 @@ class PostgresCheckpointer:
         import asyncio as _asyncio
 
         if self._pool_lock is None:
-            self._pool_lock = _asyncio.Lock()
+            with _pg_lock_init:
+                if self._pool_lock is None:
+                    self._pool_lock = _asyncio.Lock()
 
         async with self._pool_lock:
             # Re-check after acquiring lock (double-checked locking)

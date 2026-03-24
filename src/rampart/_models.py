@@ -7,8 +7,8 @@ import hashlib
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any, Literal
+from datetime import datetime, timezone
+from typing import Any, Literal, get_args
 
 # ── State ─────────────────────────────────────────────────────────────────────
 
@@ -140,7 +140,7 @@ class RunTrace:
     graph_version: str
     started_at: datetime
     completed_at: datetime | None
-    status: Literal["running", "completed", "failed", "paused", "budget_exceeded", "resumed"]
+    status: Literal["running", "completed", "failed", "paused", "budget_exceeded", "resumed", "cancelled"]
     nodes_executed: list[NodeTrace] = field(default_factory=list)
     total_input_tokens: int = 0
     total_output_tokens: int = 0
@@ -239,6 +239,15 @@ class BudgetDecision:
     action: Literal["hard_stop", "extend", "downgrade"]
     updated_budget: Budget | None = None
 
+    def __post_init__(self) -> None:
+        allowed = get_args(self.__dataclass_fields__["action"].type)
+        if not allowed:
+            allowed = ("hard_stop", "extend", "downgrade")
+        if self.action not in allowed:
+            raise ValueError(
+                f"Invalid action {self.action!r}; must be one of {allowed}"
+            )
+
     @staticmethod
     def hard_stop() -> BudgetDecision:
         return BudgetDecision(action="hard_stop")
@@ -288,6 +297,15 @@ class ApprovalPolicy:
     delivery: Literal["webhook", "slack", "email"] = "webhook"
     delivery_target: str | None = None
 
+    def __post_init__(self) -> None:
+        allowed = get_args(self.__dataclass_fields__["delivery"].type)
+        if not allowed:
+            allowed = ("webhook", "slack", "email")
+        if self.delivery not in allowed:
+            raise ValueError(
+                f"Invalid delivery {self.delivery!r}; must be one of {allowed}"
+            )
+
 
 @dataclass
 class PermissionScope:
@@ -311,6 +329,7 @@ class PermissionViolationEvent:
     attempted_action: str
     declared_scope: PermissionScope
     timestamp: datetime
+    callback: Callable[..., Any] | None = None
 
 
 # ── Testing ───────────────────────────────────────────────────────────────────
@@ -332,7 +351,7 @@ class CassetteRecord:
     format_version: str = "1.0"
     graph_name: str = ""
     graph_version: str = ""
-    recorded_at: datetime = field(default_factory=datetime.utcnow)
+    recorded_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     python_version: str = ""
     entries: list[CassetteEntry] = field(default_factory=list)
     content_hash: str = ""

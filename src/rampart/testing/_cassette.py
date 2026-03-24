@@ -6,7 +6,7 @@ import json
 import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +23,7 @@ class _CassetteNS:
         cassette = CassetteRecord(
             graph_name="",
             graph_version="",
-            recorded_at=datetime.utcnow(),
+            recorded_at=datetime.now(timezone.utc),
             python_version=f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
         )
         state = _TestingState(
@@ -112,11 +112,21 @@ def _load_cassette(path: str) -> CassetteRecord:
         format_version=data.get("format_version", "1.0"),
         graph_name=data.get("graph_name", ""),
         graph_version=data.get("graph_version", ""),
-        recorded_at=datetime.fromisoformat(data.get("recorded_at", datetime.utcnow().isoformat())),
+        recorded_at=datetime.fromisoformat(data.get("recorded_at", datetime.now(timezone.utc).isoformat())),
         python_version=data.get("python_version", ""),
         entries=entries,
         content_hash=data.get("content_hash", ""),
     )
+    if record.content_hash:
+        actual_hash = record.compute_hash()
+        if actual_hash != record.content_hash:
+            import warnings
+
+            warnings.warn(
+                f"Cassette content hash mismatch: file may have been manually edited. "
+                f"Expected {record.content_hash[:16]}..., got {actual_hash[:16]}...",
+                stacklevel=2,
+            )
     return record
 
 

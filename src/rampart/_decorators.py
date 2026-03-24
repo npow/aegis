@@ -59,6 +59,14 @@ class ToolDef:
         self.__name__ = fn.__name__
         self.__doc__ = fn.__doc__
 
+        if permissions is not None:
+            import warnings
+            warnings.warn(
+                f"Tool '{name}' declares per-tool permissions, but per-tool permission "
+                "enforcement is not yet implemented. Use graph-level PermissionScope instead.",
+                stacklevel=3,
+            )
+
     async def __call__(self, **kwargs: Any) -> Any:
         return await self.fn(**kwargs)
 
@@ -102,6 +110,8 @@ class NodeDef:
         if sandbox:
             import sys
 
+            self._original_qualname = fn.__qualname__
+            self._original_name = fn.__name__
             _mod = sys.modules.get(fn.__module__)
             if _mod is not None:
                 _private = f"_rampart_node_fn_{fn.__qualname__.replace('.', '_')}"
@@ -450,6 +460,13 @@ def tool(
 
     def decorator(fn: Callable[..., Any]) -> ToolDef:
         tool_name = name or fn.__name__
+        if require_human_approval:
+            valid_timeouts = ("hard_stop", "deny", "approve")
+            if approval_on_timeout not in valid_timeouts:
+                raise ValueError(
+                    f"@tool approval_on_timeout must be one of {valid_timeouts}, "
+                    f"got {approval_on_timeout!r}"
+                )
         td = ToolDef(
             fn,
             name=tool_name,

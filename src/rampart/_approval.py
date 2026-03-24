@@ -23,7 +23,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
+
+
+class ApprovalDeliveryError(Exception):
+    """Raised when a synchronous approval delivery channel fails."""
 
 
 async def request_approval(
@@ -53,10 +60,20 @@ async def request_approval(
         return await _webhook_approval(payload, policy)
     elif policy.delivery == "slack":
         await _slack_notify(payload, policy)
-        return _resolve_timeout(policy)
+        return _resolve_timeout(
+            policy,
+            run_id=payload["run_id"],
+            thread_id=payload["thread_id"],
+            node_name=payload["node_name"],
+        )
     elif policy.delivery == "email":
         await _email_notify(payload, policy)
-        return _resolve_timeout(policy)
+        return _resolve_timeout(
+            policy,
+            run_id=payload["run_id"],
+            thread_id=payload["thread_id"],
+            node_name=payload["node_name"],
+        )
 
     # Unknown channel — deny and warn
     import warnings
@@ -81,7 +98,12 @@ async def _webhook_approval(payload: dict[str, Any], policy: Any) -> bool:
             "denying tool call by default.",
             stacklevel=3,
         )
-        return _resolve_timeout(policy)
+        return _resolve_timeout(
+            policy,
+            run_id=payload.get("run_id", ""),
+            thread_id=payload.get("thread_id", ""),
+            node_name=payload.get("node_name", ""),
+        )
 
     try:
         import httpx  # type: ignore[import]
@@ -94,33 +116,45 @@ async def _webhook_approval(payload: dict[str, Any], policy: Any) -> bool:
             f"Falling back to on_timeout='{policy.on_timeout}'.",
             stacklevel=3,
         )
-        return _resolve_timeout(policy)
+        return _resolve_timeout(
+            policy,
+            run_id=payload.get("run_id", ""),
+            thread_id=payload.get("thread_id", ""),
+            node_name=payload.get("node_name", ""),
+        )
 
     try:
-        async with httpx.AsyncClient() as client:
-            response = await asyncio.wait_for(
-                client.post(
-                    policy.delivery_target,
-                    json=payload,
-                    headers={"Content-Type": "application/json"},
-                ),
-                timeout=float(policy.timeout_seconds),
+        timeout = float(policy.timeout_seconds)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                policy.delivery_target,
+                json=payload,
+                headers={"Content-Type": "application/json"},
             )
         response.raise_for_status()
         data = response.json()
         return bool(data.get("approved", False))
 
     except asyncio.TimeoutError:
-        return _resolve_timeout(policy)
-    except Exception as exc:
-        import warnings
-
-        warnings.warn(
-            f"Webhook approval request to {policy.delivery_target!r} failed: {exc}. "
-            f"Applying on_timeout='{policy.on_timeout}'.",
-            stacklevel=3,
+        return _resolve_timeout(
+            policy,
+            run_id=payload.get("run_id", ""),
+            thread_id=payload.get("thread_id", ""),
+            node_name=payload.get("node_name", ""),
         )
-        return _resolve_timeout(policy)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "Webhook approval request to %r failed: %s. "
+            "Applying on_timeout='%s'.",
+            policy.delivery_target,
+            exc,
+            policy.on_timeout,
+        )
+        raise ApprovalDeliveryError(
+            f"Webhook approval request to {policy.delivery_target!r} failed: {exc}"
+        ) from exc
 
 
 # ── Slack ──────────────────────────────────────────────────────────────────────
@@ -152,15 +186,12 @@ async def _slack_notify(payload: dict[str, Any], policy: Any) -> None:
     try:
         import httpx  # type: ignore[import]
 
-        async with httpx.AsyncClient() as client:
-            await asyncio.wait_for(
-                client.post(policy.delivery_target, json=message),
-                timeout=10.0,
-            )
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            await client.post(policy.delivery_target, json=message)
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:
-        import warnings
-
-        warnings.warn(f"Slack approval notification failed: {exc}", stacklevel=3)
+        logger.warning("Slack approval notification failed: %s", exc)
 
 
 # ── Email ──────────────────────────────────────────────────────────────────────
@@ -217,9 +248,7 @@ async def _email_notify(payload: dict[str, Any], policy: Any) -> None:
             body,
         )
     except Exception as exc:
-        import warnings
-
-        warnings.warn(f"Email approval notification failed: {exc}", stacklevel=3)
+        logger.warning("Email approval notification failed: %s", exc)
 
 
 def _send_smtp_sync(smtp_url: str, to_addr: str, subject: str, body: str) -> None:
@@ -249,7 +278,13 @@ def _send_smtp_sync(smtp_url: str, to_addr: str, subject: str, body: str) -> Non
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 
-def _resolve_timeout(policy: Any) -> bool:
+def _resolve_timeout(
+    policy: Any,
+    *,
+    run_id: str = "",
+    thread_id: str = "",
+    node_name: str = "",
+) -> bool:
     """Apply the on_timeout policy after a notification is sent.
 
     Returns True (auto-approve), False (auto-deny), or raises PermissionDeniedError
@@ -260,18 +295,18 @@ def _resolve_timeout(policy: Any) -> bool:
     elif policy.on_timeout == "deny":
         return False
     else:  # "hard_stop"
-        from datetime import datetime
+        from datetime import datetime, timezone
 
         from ._models import PermissionDeniedError, PermissionViolationEvent
 
         event = PermissionViolationEvent(
-            run_id="",
-            thread_id="",
-            node_name="",
+            run_id=run_id,
+            thread_id=thread_id,
+            node_name=node_name,
             violation_type="tool_not_in_whitelist",
             attempted_action="approval timed out (hard_stop policy)",
             declared_scope=None,  # type: ignore[arg-type]
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
         )
         raise PermissionDeniedError(event)
 
