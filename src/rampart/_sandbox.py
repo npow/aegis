@@ -122,7 +122,7 @@ def _run_node_in_subprocess(
             if max_cpu_seconds is not None:
                 _res.setrlimit(_res.RLIMIT_CPU, (max_cpu_seconds, max_cpu_seconds))
         except (ImportError, OSError, ValueError) as exc:
-            warnings.warn(f"Could not set resource limits: {exc}")
+            warnings.warn(f"Could not set resource limits: {exc}", stacklevel=2)
 
     # ── Reconstruct state ────────────────────────────────────────────────────
     known = {f.name for f in dataclasses.fields(state_class)}

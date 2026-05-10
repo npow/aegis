@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -196,3 +195,48 @@ async def test_ttl_expire_called():
 
     assert len(expire_calls) == 1
     assert expire_calls[0][1] == 7 * 86400
+
+
+@pytest.mark.asyncio
+async def test_close_resets_client_to_none():
+    """RedisCheckpointer.close() must call aclose() and clear the client field
+    so a fresh connection is opened on next use."""
+    cp = RedisCheckpointer(url="redis://fake")
+
+    aclose_calls: list[bool] = []
+
+    class FakeClient:
+        async def aclose(self) -> None:
+            aclose_calls.append(True)
+
+    cp._client = FakeClient()
+    await cp.close()
+    assert aclose_calls == [True]
+    assert cp._client is None
+
+
+@pytest.mark.asyncio
+async def test_close_is_noop_when_no_client():
+    """close() must not raise if no client was ever connected."""
+    cp = RedisCheckpointer(url="redis://fake")
+    assert cp._client is None
+    await cp.close()  # must not raise
+    assert cp._client is None
+
+
+@pytest.mark.asyncio
+async def test_async_context_manager_closes_on_exit():
+    """`async with` invocation must call close() automatically."""
+    cp = RedisCheckpointer(url="redis://fake")
+
+    aclose_calls: list[bool] = []
+
+    class FakeClient:
+        async def aclose(self) -> None:
+            aclose_calls.append(True)
+
+    cp._client = FakeClient()
+    async with cp as entered:
+        assert entered is cp
+    assert aclose_calls == [True]
+    assert cp._client is None

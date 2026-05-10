@@ -1,14 +1,12 @@
 """Tests for artifact versioning (_artifacts.py)."""
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
 
 import pytest
 
 import rampart
 from rampart._artifacts import ArtifactNotFoundError, MemoryArtifactStore, SqliteArtifactStore
-
 
 # ── Shared state type ──────────────────────────────────────────────────────────
 

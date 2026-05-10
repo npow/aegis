@@ -417,3 +417,56 @@ async def test_trace_snapshot_assertion_creates_golden_on_first_run():
         # Second run with same trace should also pass
         passed2, _ = evaluate_assertion(assertion, EvalState(), trace)
         assert passed2 is True
+
+
+# ── _compute_llm_judge_score: shortcuts when litellm unavailable ─────────────
+
+
+@pytest.mark.asyncio
+async def test_llm_judge_score_returns_none_when_no_model_configured():
+    """If llm_judge_model is None, _compute_llm_judge_score short-circuits."""
+    from rampart.eval import EvalSuite
+
+    @graph(name="trivial-eval-graph", version="1.0.0")
+    async def trivial_graph(state: EvalState) -> EvalState:
+        return state
+
+    suite = EvalSuite(
+        name="no-judge",
+        graph=trivial_graph,
+        cases=[],
+        pass_rate_gate=0.0,
+    )
+    score = await suite._compute_llm_judge_score(case_results=[])
+    assert score is None
+
+
+@pytest.mark.asyncio
+async def test_llm_judge_score_returns_none_when_litellm_missing(monkeypatch):
+    """If litellm isn't installed, _compute_llm_judge_score returns None
+    rather than raising — the score is advisory."""
+    from rampart.eval import EvalSuite
+
+    @graph(name="judge-no-litellm-graph", version="1.0.0")
+    async def trivial_graph2(state: EvalState) -> EvalState:
+        return state
+
+    suite = EvalSuite(
+        name="judge-no-litellm",
+        graph=trivial_graph2,
+        cases=[],
+        pass_rate_gate=0.0,
+        llm_judge_model="gpt-4",
+    )
+    # Stub the import to raise ImportError.
+    import builtins
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "litellm":
+            raise ImportError("not installed")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    score = await suite._compute_llm_judge_score(case_results=[])
+    assert score is None

@@ -9,7 +9,6 @@ import pytest
 from rampart._approval import _resolve_timeout, request_approval
 from rampart._models import ApprovalPolicy, PermissionDeniedError
 
-
 # ── _resolve_timeout ───────────────────────────────────────────────────────────
 
 
@@ -213,7 +212,9 @@ async def test_email_no_smtp_url_warns_and_applies_timeout():
 
         os.environ.pop("RAMPART_SMTP_URL", None)
 
-        with warnings.catch_warnings(record=True) as caught:
+        # The catch_warnings block silences the SMTP-missing UserWarning so it
+        # doesn't pollute test output; we don't assert on the captured list.
+        with warnings.catch_warnings():
             warnings.simplefilter("always")
             result = await request_approval(
                 tool_name="rm_rf",
@@ -240,3 +241,66 @@ async def test_unknown_channel_denies():
             timeout_seconds=5,
             on_timeout="approve",
         )
+
+
+# ── Additional coverage for soft-failure delivery branches ────────────────────
+
+
+@pytest.mark.asyncio
+async def test_slack_no_target_warns_and_applies_timeout():
+    """delivery='slack' with no delivery_target: warn, skip the HTTP call,
+    and return whatever on_timeout dictates (no Slack request is made)."""
+    import warnings
+
+    policy = ApprovalPolicy(
+        delivery="slack",
+        delivery_target=None,
+        timeout_seconds=5,
+        on_timeout="approve",
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = await request_approval(
+            tool_name="tool",
+            args={},
+            run_id="r1",
+            thread_id="t1",
+            node_name="n",
+            call_id="c",
+            policy=policy,
+        )
+    assert result is True  # on_timeout="approve"
+    assert any(
+        "Slack" in str(w.message) and "delivery_target is not set" in str(w.message)
+        for w in caught
+    )
+
+
+@pytest.mark.asyncio
+async def test_email_no_target_warns_and_applies_timeout():
+    """delivery='email' with no delivery_target: warn and apply on_timeout
+    without trying SMTP."""
+    import warnings
+
+    policy = ApprovalPolicy(
+        delivery="email",
+        delivery_target=None,
+        timeout_seconds=5,
+        on_timeout="deny",
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = await request_approval(
+            tool_name="tool",
+            args={},
+            run_id="r1",
+            thread_id="t1",
+            node_name="n",
+            call_id="c",
+            policy=policy,
+        )
+    assert result is False  # on_timeout="deny"
+    assert any(
+        "email" in str(w.message) and "delivery_target is not set" in str(w.message)
+        for w in caught
+    )
