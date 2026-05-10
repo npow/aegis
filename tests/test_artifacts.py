@@ -1,14 +1,13 @@
 """Tests for artifact versioning (_artifacts.py)."""
+
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
 
 import pytest
 
 import rampart
 from rampart._artifacts import ArtifactNotFoundError, MemoryArtifactStore, SqliteArtifactStore
-
 
 # ── Shared state type ──────────────────────────────────────────────────────────
 
@@ -248,6 +247,7 @@ async def test_artifact_context_load_raises_when_missing():
 @pytest.mark.asyncio
 async def test_artifact_list_returns_empty_without_store():
     """list() with no artifact store configured returns []."""
+
     @rampart.node
     async def _list_no_store(state: ArtState, artifacts: rampart.ArtifactContext) -> ArtState:
         arts = await artifacts.list()

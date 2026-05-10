@@ -21,11 +21,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
-
 
 # ── Artifact model ─────────────────────────────────────────────────────────────
 
@@ -34,19 +33,19 @@ from typing import Any, Protocol, runtime_checkable
 class Artifact:
     """A named, versioned output saved during a graph run."""
 
-    id: str            # "art_{graph}_{thread}_{run}_{name}_{hash[:6]}"
-    name: str          # user-defined label, e.g. "summary", "embeddings"
+    id: str  # "art_{graph}_{thread}_{run}_{name}_{hash[:6]}"
+    name: str  # user-defined label, e.g. "summary", "embeddings"
     run_id: str
     thread_id: str
     graph_name: str
     graph_version: str
     node_name: str
     step: int
-    data: Any          # JSON-serializable payload
+    data: Any  # JSON-serializable payload
     tags: list[str]
     created_at: datetime
     size_bytes: int
-    data_type: str     # type(data).__name__
+    data_type: str  # type(data).__name__
 
 
 class ArtifactNotFoundError(Exception):
@@ -87,11 +86,9 @@ class ArtifactStoreBase(Protocol):
         """Release resources."""
         ...
 
-    async def __aenter__(self) -> ArtifactStoreBase:
-        ...
+    async def __aenter__(self) -> ArtifactStoreBase: ...
 
-    async def __aexit__(self, *args: object) -> None:
-        ...
+    async def __aexit__(self, *args: object) -> None: ...
 
 
 # ── MemoryArtifactStore ────────────────────────────────────────────────────────
@@ -279,6 +276,7 @@ class SqliteArtifactStore:
         name: str | None = None,
     ) -> list[Artifact]:
         db = await self._get_db()
+        params: tuple[str, ...]
         if name is not None:
             q = (
                 "SELECT * FROM rampart_artifacts "
@@ -402,8 +400,9 @@ class ArtifactContext:
         """Return all artifacts for the current thread, optionally filtered by name."""
         if self._ctx.artifact_store is None:
             return []
-        return await self._ctx.artifact_store.list(
+        result: list[Artifact] = await self._ctx.artifact_store.list(
             thread_id=self._ctx.thread_id,
             graph_name=self._ctx.graph_name,
             name=name,
         )
+        return result

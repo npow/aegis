@@ -7,7 +7,7 @@ import functools
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, cast
 
 from ._decorators import GraphDef
 from ._models import AgentState, RunConfig, RunResult
@@ -302,8 +302,9 @@ def supervisor(
 @functools.lru_cache(maxsize=32)
 def _get_merged_state_class(base_type: type) -> type:
     @dataclass
-    class _MergedState(base_type):  # type: ignore[misc]
+    class _MergedState(base_type):  # type: ignore[misc, valid-type]
         _parallel_results: list = field(default_factory=list)
+
     return _MergedState
 
 
@@ -313,14 +314,18 @@ def _merge_parallel_results(original: AgentState, results: list[RunResult]) -> A
     # The join graph node can access state._parallel_results
     import dataclasses
 
-    _MergedState = _get_merged_state_class(type(original))
+    # `type(original)` is type[AgentState]; cast to plain `type` because the
+    # AgentState dataclass has __hash__ = None (mutable, eq=True) which makes
+    # it incompatible with lru_cache's Hashable bound — the *class object*
+    # itself is hashable, but mypy looks at __hash__ on the bound type.
+    _MergedState = _get_merged_state_class(cast("type", type(original)))
 
     try:
-        merged = _MergedState(
+        merged: AgentState = _MergedState(  # type: ignore[call-arg]
             **{f.name: getattr(original, f.name) for f in dataclasses.fields(original)},
             _parallel_results=results,
         )
-        return merged  # type: ignore[return-value]
+        return merged
     except Exception:
         # Fallback: return original with results as attribute
         result = dataclasses.replace(original)

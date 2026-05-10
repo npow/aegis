@@ -146,8 +146,7 @@ async def _webhook_approval(payload: dict[str, Any], policy: Any) -> bool:
         raise
     except Exception as exc:
         logger.warning(
-            "Webhook approval request to %r failed: %s. "
-            "Applying on_timeout='%s'.",
+            "Webhook approval request to %r failed: %s. Applying on_timeout='%s'.",
             policy.delivery_target,
             exc,
             policy.on_timeout,
@@ -305,7 +304,7 @@ def _resolve_timeout(
             node_name=node_name,
             violation_type="tool_not_in_whitelist",
             attempted_action="approval timed out (hard_stop policy)",
-            declared_scope=None,  # type: ignore[arg-type]
+            declared_scope=None,
             timestamp=datetime.now(timezone.utc),
         )
         raise PermissionDeniedError(event)

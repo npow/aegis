@@ -112,7 +112,9 @@ def _load_cassette(path: str) -> CassetteRecord:
         format_version=data.get("format_version", "1.0"),
         graph_name=data.get("graph_name", ""),
         graph_version=data.get("graph_version", ""),
-        recorded_at=datetime.fromisoformat(data.get("recorded_at", datetime.now(timezone.utc).isoformat())),
+        recorded_at=datetime.fromisoformat(
+            data.get("recorded_at", datetime.now(timezone.utc).isoformat())
+        ),
         python_version=data.get("python_version", ""),
         entries=entries,
         content_hash=data.get("content_hash", ""),

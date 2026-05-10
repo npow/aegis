@@ -76,9 +76,7 @@ def _get_pool() -> concurrent.futures.ProcessPoolExecutor:
     with _pool_lock:
         if _pool is None:
             mp_context = (
-                multiprocessing.get_context(_start_method)
-                if _start_method is not None
-                else None
+                multiprocessing.get_context(_start_method) if _start_method is not None else None
             )
             _pool = concurrent.futures.ProcessPoolExecutor(
                 max_workers=_max_workers,
@@ -122,7 +120,7 @@ def _run_node_in_subprocess(
             if max_cpu_seconds is not None:
                 _res.setrlimit(_res.RLIMIT_CPU, (max_cpu_seconds, max_cpu_seconds))
         except (ImportError, OSError, ValueError) as exc:
-            warnings.warn(f"Could not set resource limits: {exc}")
+            warnings.warn(f"Could not set resource limits: {exc}", stacklevel=2)
 
     # ── Reconstruct state ────────────────────────────────────────────────────
     known = {f.name for f in dataclasses.fields(state_class)}
