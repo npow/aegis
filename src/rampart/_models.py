@@ -140,7 +140,9 @@ class RunTrace:
     graph_version: str
     started_at: datetime
     completed_at: datetime | None
-    status: Literal["running", "completed", "failed", "paused", "budget_exceeded", "resumed", "cancelled"]
+    status: Literal[
+        "running", "completed", "failed", "paused", "budget_exceeded", "resumed", "cancelled"
+    ]
     nodes_executed: list[NodeTrace] = field(default_factory=list)
     total_input_tokens: int = 0
     total_output_tokens: int = 0
@@ -244,9 +246,7 @@ class BudgetDecision:
         if not allowed:
             allowed = ("hard_stop", "extend", "downgrade")
         if self.action not in allowed:
-            raise ValueError(
-                f"Invalid action {self.action!r}; must be one of {allowed}"
-            )
+            raise ValueError(f"Invalid action {self.action!r}; must be one of {allowed}")
 
     @staticmethod
     def hard_stop() -> BudgetDecision:
@@ -302,9 +302,7 @@ class ApprovalPolicy:
         if not allowed:
             allowed = ("webhook", "slack", "email")
         if self.delivery not in allowed:
-            raise ValueError(
-                f"Invalid delivery {self.delivery!r}; must be one of {allowed}"
-            )
+            raise ValueError(f"Invalid delivery {self.delivery!r}; must be one of {allowed}")
 
 
 @dataclass

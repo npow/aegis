@@ -38,6 +38,7 @@ class RedisCheckpointer:
         if self._client is not None:
             return self._client
         import asyncio as _asyncio
+
         if self._client_lock is None:
             self._client_lock = _asyncio.Lock()
         async with self._client_lock:

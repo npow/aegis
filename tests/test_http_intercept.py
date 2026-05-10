@@ -115,8 +115,10 @@ def test_uninstall_restores_httpx_send(fresh_install):
 
 
 def test_uninstall_restores_requests_send(fresh_install):
-    import requests
-
+    requests = pytest.importorskip(
+        "requests",
+        reason="requests is not installed; the patcher silently no-ops it",
+    )
     fresh_install.uninstall()
     pristine = requests.Session.send
     fresh_install.install()

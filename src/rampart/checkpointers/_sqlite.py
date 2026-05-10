@@ -54,7 +54,6 @@ class SqliteCheckpointer:
         self._db = db
         return db
 
-
     async def _init_schema(self, db: Any) -> None:
         await db.execute(
             """

@@ -1,4 +1,5 @@
 """Tests for human-approval delivery channels (_approval.py)."""
+
 from __future__ import annotations
 
 import asyncio
@@ -271,8 +272,7 @@ async def test_slack_no_target_warns_and_applies_timeout():
         )
     assert result is True  # on_timeout="approve"
     assert any(
-        "Slack" in str(w.message) and "delivery_target is not set" in str(w.message)
-        for w in caught
+        "Slack" in str(w.message) and "delivery_target is not set" in str(w.message) for w in caught
     )
 
 
@@ -301,6 +301,5 @@ async def test_email_no_target_warns_and_applies_timeout():
         )
     assert result is False  # on_timeout="deny"
     assert any(
-        "email" in str(w.message) and "delivery_target is not set" in str(w.message)
-        for w in caught
+        "email" in str(w.message) and "delivery_target is not set" in str(w.message) for w in caught
     )

@@ -146,8 +146,7 @@ async def _webhook_approval(payload: dict[str, Any], policy: Any) -> bool:
         raise
     except Exception as exc:
         logger.warning(
-            "Webhook approval request to %r failed: %s. "
-            "Applying on_timeout='%s'.",
+            "Webhook approval request to %r failed: %s. Applying on_timeout='%s'.",
             policy.delivery_target,
             exc,
             policy.on_timeout,

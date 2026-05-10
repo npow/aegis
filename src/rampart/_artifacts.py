@@ -33,19 +33,19 @@ from typing import Any, Protocol, runtime_checkable
 class Artifact:
     """A named, versioned output saved during a graph run."""
 
-    id: str            # "art_{graph}_{thread}_{run}_{name}_{hash[:6]}"
-    name: str          # user-defined label, e.g. "summary", "embeddings"
+    id: str  # "art_{graph}_{thread}_{run}_{name}_{hash[:6]}"
+    name: str  # user-defined label, e.g. "summary", "embeddings"
     run_id: str
     thread_id: str
     graph_name: str
     graph_version: str
     node_name: str
     step: int
-    data: Any          # JSON-serializable payload
+    data: Any  # JSON-serializable payload
     tags: list[str]
     created_at: datetime
     size_bytes: int
-    data_type: str     # type(data).__name__
+    data_type: str  # type(data).__name__
 
 
 class ArtifactNotFoundError(Exception):
@@ -86,11 +86,9 @@ class ArtifactStoreBase(Protocol):
         """Release resources."""
         ...
 
-    async def __aenter__(self) -> ArtifactStoreBase:
-        ...
+    async def __aenter__(self) -> ArtifactStoreBase: ...
 
-    async def __aexit__(self, *args: object) -> None:
-        ...
+    async def __aexit__(self, *args: object) -> None: ...
 
 
 # ── MemoryArtifactStore ────────────────────────────────────────────────────────

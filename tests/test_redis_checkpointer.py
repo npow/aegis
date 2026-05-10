@@ -1,4 +1,5 @@
 """Tests for RedisCheckpointer using a fake Redis client."""
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -145,9 +146,7 @@ async def test_idempotent_replace(fake_redis_checkpointer):
     cp = fake_redis_checkpointer
     ckpt_a = _make_ckpt(1)
     ckpt_b = _make_ckpt(1)
-    ckpt_b = Checkpoint(
-        **{**ckpt_b.__dict__, "node_name": "updated_node"}
-    )
+    ckpt_b = Checkpoint(**{**ckpt_b.__dict__, "node_name": "updated_node"})
 
     await cp.save(ckpt_a)
     await cp.save(ckpt_b)

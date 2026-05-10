@@ -191,7 +191,13 @@ async def _run_graph(
 
         if trace.status in ("failed", "cancelled", "budget_exceeded"):
             try:
-                terminal_ckpt = _make_checkpoint(ctx=ctx, step=ctx._step_counter, node_name="__terminal__", state=result_state, parent_id=ctx.last_checkpoint_id)
+                terminal_ckpt = _make_checkpoint(
+                    ctx=ctx,
+                    step=ctx._step_counter,
+                    node_name="__terminal__",
+                    state=result_state,
+                    parent_id=ctx.last_checkpoint_id,
+                )
                 await checkpointer.save(terminal_ckpt)
             except Exception:
                 pass  # Best-effort terminal checkpoint
@@ -529,7 +535,12 @@ async def _call_node_fn(
     ctx: RunContext,
 ) -> AgentState:
     """Build kwargs and call the node's original function."""
-    has_injected = node_def._needs_tools or node_def._needs_llm or node_def._needs_graphs or node_def._needs_artifacts
+    has_injected = (
+        node_def._needs_tools
+        or node_def._needs_llm
+        or node_def._needs_graphs
+        or node_def._needs_artifacts
+    )
 
     # Sandbox: run state-only nodes in an isolated subprocess
     if node_def.sandbox and not has_injected:
@@ -616,9 +627,19 @@ def _deserialize_state(data: dict[str, Any], state_type: type) -> AgentState:
         if k in known:
             field_type = known[k].type
             # Attempt to reconstruct nested dataclasses
-            if isinstance(v, dict) and isinstance(field_type, type) and dataclasses.is_dataclass(field_type):
+            if (
+                isinstance(v, dict)
+                and isinstance(field_type, type)
+                and dataclasses.is_dataclass(field_type)
+            ):
                 try:
-                    v = field_type(**{fk: fv for fk, fv in v.items() if fk in {f.name for f in dataclasses.fields(field_type)}})
+                    v = field_type(
+                        **{
+                            fk: fv
+                            for fk, fv in v.items()
+                            if fk in {f.name for f in dataclasses.fields(field_type)}
+                        }
+                    )
                 except Exception:
                     pass
             filtered[k] = v

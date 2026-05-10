@@ -61,6 +61,7 @@ class ToolDef:
 
         if permissions is not None:
             import warnings
+
             warnings.warn(
                 f"Tool '{name}' declares per-tool permissions, but per-tool permission "
                 "enforcement is not yet implemented. Use graph-level PermissionScope instead.",

@@ -1,4 +1,5 @@
 """Tests for subprocess sandboxing (@node sandbox=True)."""
+
 from __future__ import annotations
 
 import warnings
@@ -119,9 +120,7 @@ def test_configure_sandbox_updates_module_state():
         assert _sandbox._max_workers == 8
         assert _sandbox._start_method == "spawn"
     finally:
-        _sandbox.configure_sandbox(
-            max_workers=original_workers, start_method=original_method
-        )
+        _sandbox.configure_sandbox(max_workers=original_workers, start_method=original_method)
 
 
 def test_pool_initializer_resets_signal_handlers():

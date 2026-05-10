@@ -304,6 +304,7 @@ def _get_merged_state_class(base_type: type) -> type:
     @dataclass
     class _MergedState(base_type):  # type: ignore[misc]
         _parallel_results: list = field(default_factory=list)
+
     return _MergedState
 
 

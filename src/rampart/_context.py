@@ -224,6 +224,7 @@ class RunContext:
             # Per-tool permissions are declared but not yet enforced — raise NotImplementedError
             # to prevent silent permission bypass until full implementation lands.
             import warnings
+
             warnings.warn(
                 f"Tool '{tool_name}' declares per-tool permissions but enforcement is not yet "
                 "implemented. The tool will execute with graph-level permissions only.",
