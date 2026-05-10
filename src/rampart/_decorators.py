@@ -302,11 +302,12 @@ class GraphDef:
         resolved = store or _globals.DEFAULT_ARTIFACT_STORE
         if resolved is None:
             return []
-        return await resolved.list(
+        result: list[Any] = await resolved.list(
             thread_id=thread_id,
             graph_name=self.name,
             name=name,
         )
+        return result
 
     async def stream(
         self,

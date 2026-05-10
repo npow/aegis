@@ -546,11 +546,12 @@ async def _call_node_fn(
     if node_def.sandbox and not has_injected:
         from ._sandbox import run_sandboxed
 
-        return await run_sandboxed(
+        sandboxed: AgentState = await run_sandboxed(
             fn=node_def.fn,
             state=state,
             state_class=type(state),
         )
+        return sandboxed
     elif node_def.sandbox and has_injected:
         import warnings
 
@@ -643,7 +644,8 @@ def _deserialize_state(data: dict[str, Any], state_type: type) -> AgentState:
                 except Exception:
                     pass
             filtered[k] = v
-    return state_type(**filtered)
+    state: AgentState = state_type(**filtered)
+    return state
 
 
 def _infer_state_type(graph_def: GraphDef) -> type:

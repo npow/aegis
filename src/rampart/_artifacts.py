@@ -276,6 +276,7 @@ class SqliteArtifactStore:
         name: str | None = None,
     ) -> list[Artifact]:
         db = await self._get_db()
+        params: tuple[str, ...]
         if name is not None:
             q = (
                 "SELECT * FROM rampart_artifacts "
@@ -399,8 +400,9 @@ class ArtifactContext:
         """Return all artifacts for the current thread, optionally filtered by name."""
         if self._ctx.artifact_store is None:
             return []
-        return await self._ctx.artifact_store.list(
+        result: list[Artifact] = await self._ctx.artifact_store.list(
             thread_id=self._ctx.thread_id,
             graph_name=self._ctx.graph_name,
             name=name,
         )
+        return result

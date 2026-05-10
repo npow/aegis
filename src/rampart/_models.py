@@ -325,7 +325,10 @@ class PermissionViolationEvent:
         "http_intercept_blocked",
     ]
     attempted_action: str
-    declared_scope: PermissionScope
+    # The active scope at the time of violation. May be None when the run had
+    # no explicit permission_scope set (e.g. for the approval-denied path that
+    # triggers without a configured allowlist).
+    declared_scope: PermissionScope | None
     timestamp: datetime
     callback: Callable[..., Any] | None = None
 
